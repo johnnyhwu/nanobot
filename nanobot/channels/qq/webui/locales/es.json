@@ -1,0 +1,46 @@
+{
+  "setup": {
+    "docsLabel": "Abrir guía de QQ",
+    "officialLabel": "Abrir consola del bot de QQ",
+    "fields": {
+      "appId": {
+        "label": "App ID",
+        "placeholder": "App ID del bot de QQ"
+      },
+      "secret": {
+        "label": "Secret",
+        "placeholder": "••••••"
+      },
+      "allowFrom": {
+        "label": "Usuarios permitidos",
+        "placeholder": "Open ID separados por comas"
+      },
+      "msgFormat": {
+        "label": "Formato de mensajes",
+        "choices": {
+          "plain": "Texto sin formato",
+          "markdown": "Markdown"
+        }
+      },
+      "ackMessage": {
+        "label": "Mensaje de recepción"
+      },
+      "mediaDir": {
+        "label": "Directorio de medios"
+      },
+      "downloadChunkSize": {
+        "label": "Tamaño de bloque (bytes)"
+      },
+      "downloadMaxBytes": {
+        "label": "Límite de descarga (bytes)"
+      },
+      "showCompactionNotices": {
+        "label": "Avisos de compactación",
+        "choices": {
+          "true": "Activado",
+          "false": "Desactivado"
+        }
+      }
+    }
+  }
+}

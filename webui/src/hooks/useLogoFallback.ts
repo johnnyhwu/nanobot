@@ -47,6 +47,8 @@ export function useLogoFallback(urls: readonly string[] | undefined) {
   const safeUrls = useMemo(() => logoUrlsFromKey(cacheKey), [cacheKey]);
   const [logoIndex, setLogoIndex] = useState(() => firstUsableLogoIndex(safeUrls));
   const logoUrl = logoIndex >= 0 ? safeUrls[logoIndex] : undefined;
+  const [loadedUrl, setLoadedUrl] = useState<string>();
+  const logoLoaded = Boolean(logoUrl && (loadedUrl === logoUrl || loadedLogoUrls.has(logoUrl)));
 
   useEffect(() => {
     setLogoIndex(firstUsableLogoIndex(safeUrls));
@@ -57,18 +59,21 @@ export function useLogoFallback(urls: readonly string[] | undefined) {
     loadedLogoUrls.add(logoUrl);
     failedLogoUrls.delete(logoUrl);
     resolvedLogoIndexByKey.set(cacheKey, logoIndex);
+    setLoadedUrl(logoUrl);
   }, [cacheKey, logoIndex, logoUrl]);
 
   const onLogoError = useCallback(() => {
     if (!logoUrl || logoIndex < 0) return;
     failedLogoUrls.add(logoUrl);
+    loadedLogoUrls.delete(logoUrl);
     if (resolvedLogoIndexByKey.get(cacheKey) === logoIndex) {
       resolvedLogoIndexByKey.delete(cacheKey);
     }
+    setLoadedUrl(undefined);
     setLogoIndex(nextLogoIndex(safeUrls, logoIndex));
   }, [cacheKey, logoIndex, logoUrl, safeUrls]);
 
-  return { logoUrl, onLogoLoad, onLogoError };
+  return { logoUrl, logoLoaded, onLogoLoad, onLogoError };
 }
 
 export function __clearLogoFallbackCacheForTests(): void {

@@ -1,0 +1,46 @@
+{
+  "setup": {
+    "docsLabel": "QQ 設定ガイドを開く",
+    "officialLabel": "QQ ボットコンソールを開く",
+    "fields": {
+      "appId": {
+        "label": "App ID",
+        "placeholder": "QQ ボット App ID"
+      },
+      "secret": {
+        "label": "Secret",
+        "placeholder": "••••••"
+      },
+      "allowFrom": {
+        "label": "許可ユーザー",
+        "placeholder": "Open ID（カンマ区切り）"
+      },
+      "msgFormat": {
+        "label": "メッセージ形式",
+        "choices": {
+          "plain": "プレーンテキスト",
+          "markdown": "Markdown"
+        }
+      },
+      "ackMessage": {
+        "label": "受信確認のメッセージ"
+      },
+      "mediaDir": {
+        "label": "メディアディレクトリ"
+      },
+      "downloadChunkSize": {
+        "label": "チャンクのサイズ（バイト）"
+      },
+      "downloadMaxBytes": {
+        "label": "ダウンロードの上限（バイト）"
+      },
+      "showCompactionNotices": {
+        "label": "圧縮の通知",
+        "choices": {
+          "true": "オン",
+          "false": "オフ"
+        }
+      }
+    }
+  }
+}

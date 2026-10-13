@@ -1,0 +1,46 @@
+{
+  "setup": {
+    "docsLabel": "打开 QQ 配置指南",
+    "officialLabel": "打开 QQ 机器人后台",
+    "fields": {
+      "appId": {
+        "label": "App ID",
+        "placeholder": "QQ 机器人 App ID"
+      },
+      "secret": {
+        "label": "Secret",
+        "placeholder": "••••••"
+      },
+      "allowFrom": {
+        "label": "允许用户",
+        "placeholder": "Open ID，用逗号分隔"
+      },
+      "msgFormat": {
+        "label": "消息格式",
+        "choices": {
+          "plain": "纯文本",
+          "markdown": "Markdown"
+        }
+      },
+      "ackMessage": {
+        "label": "处理提示"
+      },
+      "mediaDir": {
+        "label": "媒体目录"
+      },
+      "downloadChunkSize": {
+        "label": "分块大小（字节）"
+      },
+      "downloadMaxBytes": {
+        "label": "下载上限（字节）"
+      },
+      "showCompactionNotices": {
+        "label": "压缩通知",
+        "choices": {
+          "true": "开",
+          "false": "关"
+        }
+      }
+    }
+  }
+}

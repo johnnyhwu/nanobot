@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
+
+from nanobot.session.manager import SessionPolicy
 
 
 def ensure_single_model_selector(
@@ -22,6 +25,7 @@ def build_process_direct_kwargs(
     sender_id: str,
     media: list[str] | None,
     ephemeral: bool,
+    attributes: Mapping[str, Any] | None = None,
     on_stream: Any | None = None,
     on_stream_end: Any | None = None,
 ) -> dict[str, Any]:
@@ -37,6 +41,9 @@ def build_process_direct_kwargs(
     if ephemeral:
         kwargs["ephemeral"] = True
         kwargs["_run_extra_hooks_for_ephemeral"] = True
+        kwargs["_session_policy"] = SessionPolicy(persist=False, log_content=False)
+    if attributes is not None:
+        kwargs["attributes"] = dict(attributes)
     if on_stream is not None:
         kwargs["on_stream"] = on_stream
     if on_stream_end is not None:

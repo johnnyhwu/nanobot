@@ -1,0 +1,46 @@
+{
+  "setup": {
+    "docsLabel": "Mở hướng dẫn QQ",
+    "officialLabel": "Mở bảng điều khiển bot QQ",
+    "fields": {
+      "appId": {
+        "label": "App ID",
+        "placeholder": "App ID bot QQ"
+      },
+      "secret": {
+        "label": "Secret",
+        "placeholder": "••••••"
+      },
+      "allowFrom": {
+        "label": "Người dùng được phép",
+        "placeholder": "Open ID, phân tách bằng dấu phẩy"
+      },
+      "msgFormat": {
+        "label": "Định dạng tin nhắn",
+        "choices": {
+          "plain": "Văn bản thuần",
+          "markdown": "Markdown"
+        }
+      },
+      "ackMessage": {
+        "label": "Tin nhắn xác nhận nhận"
+      },
+      "mediaDir": {
+        "label": "Thư mục phương tiện"
+      },
+      "downloadChunkSize": {
+        "label": "Kích thước khối (byte)"
+      },
+      "downloadMaxBytes": {
+        "label": "Giới hạn tải xuống (byte)"
+      },
+      "showCompactionNotices": {
+        "label": "Thông báo nén",
+        "choices": {
+          "true": "Bật",
+          "false": "Tắt"
+        }
+      }
+    }
+  }
+}

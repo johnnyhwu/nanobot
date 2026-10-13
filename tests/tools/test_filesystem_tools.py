@@ -2,13 +2,35 @@
 
 import pytest
 
+from nanobot.agent.tools.file_state import file_read_context
 from nanobot.agent.tools.filesystem import (
     EditFileTool,
     ListDirTool,
     ReadFileTool,
     WriteFileTool,
-    _find_match,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("operation", ["write", "edit_new", "edit_empty"])
+async def test_file_creation_preserves_provided_newlines(tmp_path, newline, operation):
+    target = tmp_path / "nested" / "script.py"
+    content = f"first = 1{newline}second = 2{newline}"
+    if operation == "write":
+        result = await WriteFileTool(workspace=tmp_path).execute(
+            path=str(target), content=content,
+        )
+    else:
+        if operation == "edit_empty":
+            target.parent.mkdir()
+            target.touch()
+        result = await EditFileTool(workspace=tmp_path).execute(
+            path=str(target), old_text="", new_text=content,
+        )
+
+    assert "Error" not in result
+    assert target.read_bytes() == content.encode("utf-8")
 
 # ---------------------------------------------------------------------------
 # ReadFileTool
@@ -99,51 +121,83 @@ class TestReadFileTool:
         assert len(result) <= ReadFileTool._MAX_CHARS + 500  # small margin for footer
         assert "Use offset=" in result
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("following", ["", "\nsecond line"])
+    async def test_oversized_first_line_is_explicitly_truncated(self, tool, tmp_path, following):
+        f = tmp_path / "minified.txt"
+        original = "界" * (ReadFileTool._MAX_CHARS + 100) + "OMITTED" + following
+        f.write_text(original, encoding="utf-8")
 
-# ---------------------------------------------------------------------------
-# _find_match  (unit tests for the helper)
-# ---------------------------------------------------------------------------
+        with file_read_context("read-1", lambda: {}):
+            first = await tool.execute(path=str(f), limit=1)
 
-class TestFindMatch:
+        assert first.startswith("1| 界")
+        assert "OMITTED" not in first
+        assert len(first) <= ReadFileTool._MAX_CHARS + 500
+        assert "Line 1 truncated; its remaining characters are not shown" in first
+        assert "Use exec" in first
+        assert "column" not in tool.parameters["properties"]
+        assert f.read_text(encoding="utf-8") == original
 
-    def test_exact_match(self):
-        match, count = _find_match("hello world", "world")
-        assert match == "world"
-        assert count == 1
+        with file_read_context("read-2", lambda: {"read-1": first}):
+            repeated = await tool.execute(path=str(f), limit=1)
+        assert "File unchanged" in repeated
 
-    def test_exact_no_match(self):
-        match, count = _find_match("hello world", "xyz")
-        assert match is None
-        assert count == 0
+        if following:
+            assert "Use offset=2 to continue" in first
+            with file_read_context("read-3", lambda: {"read-1": first}):
+                second = await tool.execute(path=str(f), offset=2, limit=1)
+            assert "2| second line" in second
+            assert "End of file" in second
+        else:
+            assert "End of file" in first
+            assert "Use offset=" not in first
 
-    def test_crlf_normalisation(self):
-        # Caller normalises CRLF before calling _find_match, so test with
-        # pre-normalised content to verify exact match still works.
-        content = "line1\nline2\nline3"
-        old_text = "line1\nline2\nline3"
-        match, count = _find_match(content, old_text)
-        assert match is not None
-        assert count == 1
+    @pytest.mark.asyncio
+    async def test_long_middle_line_advances_to_following_content(self, tool, tmp_path):
+        f = tmp_path / "bundle.txt"
+        f.write_text("first\n" + "z" * (ReadFileTool._MAX_CHARS * 2) + "\nlast\n")
 
-    def test_line_trim_fallback(self):
-        content = "    def foo():\n        pass\n"
-        old_text = "def foo():\n    pass"
-        match, count = _find_match(content, old_text)
-        assert match is not None
-        assert count == 1
-        # The returned match should be the *original* indented text
-        assert "    def foo():" in match
+        first = await tool.execute(path=str(f))
+        assert "Use offset=2 to continue" in first
+        assert "truncated" not in first
 
-    def test_line_trim_multiple_candidates(self):
-        content = "  a\n  b\n  a\n  b\n"
-        old_text = "a\nb"
-        match, count = _find_match(content, old_text)
-        assert count == 2
+        second = await tool.execute(path=str(f), offset=2)
+        assert second.startswith("2| z")
+        assert len(second) <= ReadFileTool._MAX_CHARS + 500
+        assert "Line 2 truncated" in second
+        assert "Use offset=3 to continue" in second
 
-    def test_empty_old_text(self):
-        match, count = _find_match("hello", "")
-        # Empty string is always "in" any string via exact match
-        assert match == ""
+        third = await tool.execute(path=str(f), offset=3)
+        assert "3| last" in third
+        assert "End of file" in third
+
+    @pytest.mark.asyncio
+    async def test_line_exactly_fitting_budget_is_not_truncated(self, tool, tmp_path):
+        f = tmp_path / "exact.txt"
+        line = "x" * (ReadFileTool._MAX_CHARS - len("1| "))
+        f.write_text(line + "\nlast")
+
+        first = await tool.execute(path=str(f))
+        assert first.split("\n\n")[0] == "1| " + line
+        assert "truncated" not in first
+        assert "Use offset=2 to continue" in first
+
+    @pytest.mark.asyncio
+    async def test_oversized_file_is_rejected_before_read(self, tool, tmp_path, monkeypatch):
+        f = tmp_path / "huge.txt"
+        with f.open("wb") as stream:
+            stream.truncate(ReadFileTool._MAX_FILE_SIZE_BYTES + 1)
+
+        def fail_read_bytes(self):
+            raise AssertionError("oversized file content should not be loaded")
+
+        monkeypatch.setattr(type(f), "read_bytes", fail_read_bytes)
+
+        result = await tool.execute(path=str(f))
+
+        assert "File too large to read" in result
+        assert "Maximum is 100 MiB" in result
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +215,18 @@ class TestEditFileTool:
         f = tmp_path / "a.py"
         f.write_text("hello world", encoding="utf-8")
         result = await tool.execute(path=str(f), old_text="world", new_text="earth")
-        assert "Successfully" in result
+        assert "Patch applied:" in result
         assert f.read_text() == "hello earth"
+
+    @pytest.mark.asyncio
+    async def test_identical_replacement_returns_clear_error(self, tool, tmp_path):
+        f = tmp_path / "a.py"
+        f.write_text("hello world", encoding="utf-8")
+
+        result = await tool.execute(path=str(f), old_text="world", new_text="world")
+
+        assert result == "Error: new_text must be different from old_text."
+        assert f.read_text(encoding="utf-8") == "hello world"
 
     @pytest.mark.asyncio
     async def test_crlf_normalisation(self, tool, tmp_path):
@@ -171,7 +235,7 @@ class TestEditFileTool:
         result = await tool.execute(
             path=str(f), old_text="line1\nline2", new_text="LINE1\nLINE2",
         )
-        assert "Successfully" in result
+        assert "Patch applied:" in result
         raw = f.read_bytes()
         assert b"LINE1" in raw
         # CRLF line endings should be preserved throughout the file
@@ -184,7 +248,7 @@ class TestEditFileTool:
         result = await tool.execute(
             path=str(f), old_text="def foo():\n    pass", new_text="def bar():\n    return 1",
         )
-        assert "Successfully" in result
+        assert "Patch applied:" in result
         assert "bar" in f.read_text()
 
     @pytest.mark.asyncio
@@ -201,7 +265,7 @@ class TestEditFileTool:
         result = await tool.execute(
             path=str(f), old_text="foo", new_text="baz", replace_all=True,
         )
-        assert "Successfully" in result
+        assert "Patch applied:" in result
         assert f.read_text() == "baz bar baz bar baz"
 
     @pytest.mark.asyncio
@@ -262,6 +326,24 @@ class TestListDirTool:
         # Ignored dirs should not appear
         assert ".git" not in result
         assert "node_modules" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("relative_root", ["build", "build/project"])
+    async def test_recursive_ignores_only_descendants(self, tool, tmp_path, relative_root):
+        root = tmp_path / relative_root
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "main.py").write_text("pass")
+        (root / "README.md").write_text("hi")
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text("ignored")
+        (root / "src" / "node_modules").mkdir()
+        (root / "src" / "node_modules" / "package.json").write_text("{}")
+
+        result = await tool.execute(path=str(root), recursive=True)
+
+        assert set(result.replace("\\", "/").splitlines()) == {
+            "README.md", "src/", "src/main.py",
+        }
 
     @pytest.mark.asyncio
     async def test_max_entries_truncation(self, tool, tmp_path):
@@ -497,5 +579,5 @@ class TestWorkspaceRestriction:
             old_text="before",
             new_text="after",
         )
-        assert "Successfully edited" in result
+        assert "Patch applied:" in result
         assert target.read_text(encoding="utf-8") == "after\n"

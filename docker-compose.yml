@@ -2,10 +2,21 @@ x-common-config: &common-config
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-whatsapp}
   volumes:
     - ~/.nanobot:/home/nanobot/.nanobot
   cap_drop:
     - ALL
+  # Entrypoint uses these to fix bind-mount ownership and drop to the nanobot user.
+  cap_add:
+    - CHOWN
+    - SETGID
+    - SETUID
+  # Prevent the non-root process from regaining capabilities through setuid
+  # binaries or file capabilities left inside the container image.
+  security_opt:
+    - no-new-privileges:true
 
 services:
   nanobot-gateway:

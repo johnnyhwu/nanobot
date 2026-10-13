@@ -1,0 +1,46 @@
+{
+  "setup": {
+    "docsLabel": "Buka panduan QQ",
+    "officialLabel": "Buka konsol bot QQ",
+    "fields": {
+      "appId": {
+        "label": "App ID",
+        "placeholder": "App ID bot QQ"
+      },
+      "secret": {
+        "label": "Secret",
+        "placeholder": "••••••"
+      },
+      "allowFrom": {
+        "label": "Pengguna diizinkan",
+        "placeholder": "Open ID, dipisahkan koma"
+      },
+      "msgFormat": {
+        "label": "Format pesan",
+        "choices": {
+          "plain": "Teks biasa",
+          "markdown": "Markdown"
+        }
+      },
+      "ackMessage": {
+        "label": "Pesan penerimaan"
+      },
+      "mediaDir": {
+        "label": "Direktori media"
+      },
+      "downloadChunkSize": {
+        "label": "Ukuran chunk (byte)"
+      },
+      "downloadMaxBytes": {
+        "label": "Batas unduhan (byte)"
+      },
+      "showCompactionNotices": {
+        "label": "Pemberitahuan pemadatan",
+        "choices": {
+          "true": "Aktif",
+          "false": "Nonaktif"
+        }
+      }
+    }
+  }
+}

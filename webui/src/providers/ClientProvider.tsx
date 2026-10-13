@@ -1,4 +1,11 @@
-import { createContext, useContext, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 
 import type { NanobotClient } from "@/lib/nanobot-client";
 import type { WebUIIngressLimits } from "@/lib/types";
@@ -6,8 +13,10 @@ import type { WebUIIngressLimits } from "@/lib/types";
 interface ClientContextValue {
   client: NanobotClient;
   token: string;
+  getToken: () => string;
   modelName: string | null;
   ingressLimits: WebUIIngressLimits | null;
+  webuiCapabilities: string[];
 }
 
 const ClientContext = createContext<ClientContextValue | null>(null);
@@ -17,16 +26,26 @@ export function ClientProvider({
   token,
   modelName = null,
   ingressLimits = null,
+  webuiCapabilities = [],
   children,
 }: {
   client: NanobotClient;
   token: string;
   modelName?: string | null;
   ingressLimits?: WebUIIngressLimits | null;
+  webuiCapabilities?: string[];
   children: ReactNode;
 }) {
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  const getToken = useCallback(() => tokenRef.current, []);
+  const value = useMemo(
+    () => ({ client, token, getToken, modelName, ingressLimits, webuiCapabilities }),
+    [client, getToken, ingressLimits, modelName, token, webuiCapabilities],
+  );
+
   return (
-    <ClientContext.Provider value={{ client, token, modelName, ingressLimits }}>
+    <ClientContext.Provider value={value}>
       {children}
     </ClientContext.Provider>
   );

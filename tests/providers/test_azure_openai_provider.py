@@ -11,7 +11,7 @@ from nanobot.providers.azure_openai_provider import (
     AzureOpenAIProvider,
     _AzureTokenProvider,
 )
-from nanobot.providers.base import LLMResponse
+from nanobot.providers.base import LLMResponse, ProviderCallContext
 
 # ---------------------------------------------------------------------------
 # Init & validation
@@ -234,11 +234,36 @@ def test_build_body_basic():
     assert body["max_output_tokens"] == 4096
     assert body["store"] is False
     assert "reasoning" not in body
+    assert "include" not in body
     # input should contain the converted user message only (system extracted)
     assert any(
         item.get("role") == "user"
         for item in body["input"]
     )
+
+
+def test_build_body_enables_server_compaction():
+    provider = AzureOpenAIProvider(
+        api_key="k",
+        api_base="https://res.openai.azure.com",
+        default_model="gpt-5.6",
+    )
+
+    body = provider._build_body(
+        [{"role": "user", "content": "hello"}],
+        None,
+        None,
+        10_000,
+        0.1,
+        "high",
+        None,
+        provider_context=ProviderCallContext(context_window_tokens=200_000),
+    )
+
+    assert body["context_management"] == [{
+        "type": "compaction",
+        "compact_threshold": 180_000,
+    }]
 
 
 def test_build_body_max_tokens_minimum():
@@ -254,7 +279,7 @@ def test_build_body_with_tools():
     body = provider._build_body(
         [{"role": "user", "content": "weather?"}], tools, None, 4096, 0.7, None, None,
     )
-    assert body["tools"] == [{"type": "function", "name": "get_weather", "description": "", "parameters": {}}]
+    assert body["tools"] == [{"type": "function", "name": "get_weather", "description": "", "parameters": {}, "strict": False}]
     assert body["tool_choice"] == "auto"
 
 
@@ -355,7 +380,40 @@ async def test_chat_success():
     assert isinstance(result, LLMResponse)
     assert result.content == "Hello!"
     assert result.finish_reason == "stop"
-    assert result.usage["prompt_tokens"] == 10
+    assert result.usage is not None
+    assert result.usage.input_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_chat_retries_without_unsupported_server_compaction():
+    provider = AzureOpenAIProvider(
+        api_key="test-key",
+        api_base="https://test.openai.azure.com",
+        default_model="gpt-5.6",
+    )
+
+    class UnsupportedCompactionError(Exception):
+        status_code = 400
+        body = {"error": {"message": "Unknown parameter: context_management"}}
+
+    provider._client.responses = MagicMock()
+    provider._client.responses.create = AsyncMock(side_effect=[
+        UnsupportedCompactionError(),
+        _make_sdk_response(content="compaction fallback"),
+    ])
+
+    result = await provider.chat(
+        [{"role": "user", "content": "Hi"}],
+        provider_context=ProviderCallContext(context_window_tokens=200_000),
+    )
+
+    create = provider._client.responses.create
+    assert result.content == "compaction fallback"
+    assert result.provider_state is not None
+    assert create.await_count == 2
+    assert "context_management" in create.call_args_list[0].kwargs
+    assert "context_management" not in create.call_args_list[1].kwargs
+    assert provider.supports_native_compaction() is False
 
 
 @pytest.mark.asyncio
@@ -411,6 +469,7 @@ async def test_chat_with_tool_calls():
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].name == "get_weather"
     assert result.tool_calls[0].arguments == {"location": "SF"}
+    assert result.provider_state is not None
 
 
 @pytest.mark.asyncio
@@ -472,7 +531,9 @@ async def test_chat_stream_success():
             yield e
 
     provider._client.responses = MagicMock()
-    provider._client.responses.create = AsyncMock(return_value=mock_stream())
+    stream = MagicMock()
+    stream.__aiter__.side_effect = mock_stream
+    provider._client.responses.create = AsyncMock(return_value=stream)
 
     deltas: list[str] = []
 
@@ -486,6 +547,7 @@ async def test_chat_stream_success():
     assert result.content == "Hello world"
     assert result.finish_reason == "stop"
     assert deltas == ["Hello", " world"]
+    stream.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -510,6 +572,7 @@ async def test_chat_stream_with_tool_calls():
     item_done.name = "get_weather"
     ev_item_done = MagicMock(type="response.output_item.done", item=item_done)
     resp_obj = MagicMock(status="completed")
+    resp_obj.model_dump.return_value = {"status": "completed", "output": []}
     ev_completed = MagicMock(type="response.completed", response=resp_obj)
 
     async def mock_stream():
@@ -517,7 +580,9 @@ async def test_chat_stream_with_tool_calls():
             yield e
 
     provider._client.responses = MagicMock()
-    provider._client.responses.create = AsyncMock(return_value=mock_stream())
+    stream = MagicMock()
+    stream.__aiter__.side_effect = mock_stream
+    provider._client.responses.create = AsyncMock(return_value=stream)
 
     result = await provider.chat_stream(
         [{"role": "user", "content": "weather?"}],
@@ -527,6 +592,7 @@ async def test_chat_stream_with_tool_calls():
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].name == "get_weather"
     assert result.tool_calls[0].arguments == {"location": "SF"}
+    assert result.provider_state is not None
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ import pytest
 
 from nanobot.agent.goal_permission import goal_mutation_allowed
 from nanobot.agent.loop import AgentLoop
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command.builtin import (
     build_help_text,
@@ -16,6 +16,11 @@ from nanobot.command.builtin import (
 )
 from nanobot.command.router import CommandContext, CommandRouter
 from nanobot.config.schema import ModelPresetConfig
+from nanobot.session.history_visibility import HIDDEN_HISTORY_META
+from nanobot.session.model_selection import (
+    SESSION_MODEL_PRESET_METADATA_KEY,
+    model_preset_from_metadata,
+)
 
 
 def _provider(default_model: str, max_tokens: int = 123) -> MagicMock:
@@ -29,14 +34,14 @@ def _provider(default_model: str, max_tokens: int = 123) -> MagicMock:
     return provider
 
 
-def _make_loop(tmp_path) -> AgentLoop:
+def _make_loop(tmp_path, *, preset_snapshot_loader=None, model_presets=None) -> AgentLoop:
     return AgentLoop(
         bus=MessageBus(),
         provider=_provider("base-model", max_tokens=123),
         workspace=tmp_path,
         model="base-model",
         context_window_tokens=1000,
-        model_presets={
+        model_presets=model_presets or {
             "default": ModelPresetConfig(
                 model="base-model",
                 max_tokens=123,
@@ -48,6 +53,7 @@ def _make_loop(tmp_path) -> AgentLoop:
                 context_window_tokens=32_768,
             ),
         },
+        preset_snapshot_loader=preset_snapshot_loader,
     )
 
 
@@ -59,9 +65,15 @@ def _ctx(loop: AgentLoop, raw: str, args: str = "") -> CommandContext:
 def _ctx_session(loop: AgentLoop, raw: str, args: str = "") -> CommandContext:
     msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content=raw)
     return CommandContext(
-        msg=msg, session=MagicMock(), key=msg.session_key, raw=raw, args=args, loop=loop,
+        msg=msg, session=loop.sessions.get_or_create(msg.session_key),
+        key=msg.session_key, raw=raw, args=args, loop=loop,
         is_user_turn=True,
     )
+
+
+def _saved_model_preset(loop: AgentLoop, session_key: str = "cli:direct") -> str | None:
+    session = loop.sessions.get_or_create(session_key)
+    return model_preset_from_metadata(session.metadata)
 
 
 @pytest.mark.asyncio
@@ -84,23 +96,46 @@ async def test_model_command_switches_preset(tmp_path) -> None:
     out = await cmd_model(_ctx(loop, "/model fast", args="fast"))
 
     assert "Switched model preset to `fast`." in out.content
+    assert "Scope: current session" in out.content
     assert "Model: `openai/gpt-4.1`" in out.content
-    assert loop.model_preset == "fast"
-    assert loop.model == "openai/gpt-4.1"
-    assert not hasattr(loop.subagents, "model")
-    assert not hasattr(loop.consolidator, "model")
-    assert loop.llm_runtime().model == "openai/gpt-4.1"
+    assert _saved_model_preset(loop) == "fast"
+    assert loop.model_preset is None
+    assert loop.model == "base-model"
+
+    await loop.process_direct("/new", session_key="cli:direct")
+    assert _saved_model_preset(loop) == "fast"
+    status = await loop.process_direct("/status", session_key="cli:direct")
+    assert status is not None and "openai/gpt-4.1" in status.content
+
+
+@pytest.mark.asyncio
+async def test_model_command_accepts_canonical_names_with_spaces(tmp_path) -> None:
+    loop = _make_loop(
+        tmp_path,
+        model_presets={
+            "default": ModelPresetConfig(model="base-model"),
+            "Deep Research": ModelPresetConfig(model="deep-model"),
+        },
+    )
+
+    out = await cmd_model(
+        _ctx(loop, "/model deep research", args="deep research"),
+    )
+
+    assert "Switched model preset to `Deep Research`." in out.content
+    assert _saved_model_preset(loop) == "Deep Research"
 
 
 @pytest.mark.asyncio
 async def test_model_command_switches_back_to_default(tmp_path) -> None:
     loop = _make_loop(tmp_path)
-    loop.set_model_preset("fast")
+    await cmd_model(_ctx(loop, "/model fast", args="fast"))
 
     out = await cmd_model(_ctx(loop, "/model default", args="default"))
 
     assert "Switched model preset to `default`." in out.content
-    assert loop.model_preset == "default"
+    assert _saved_model_preset(loop) == "default"
+    assert loop.model_preset is None
     assert loop.model == "base-model"
     assert loop.context_window_tokens == 1000
 
@@ -119,13 +154,31 @@ async def test_model_command_unknown_preset_keeps_old_state(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_command_reports_provider_configuration_errors(tmp_path) -> None:
+    def fail_preset(_name: str):
+        raise ValueError("No API key configured for provider 'openai'.")
+
+    loop = _make_loop(tmp_path, preset_snapshot_loader=fail_preset)
+
+    switched = await cmd_model(_ctx(loop, "/model fast", args="fast"))
+    session = loop.sessions.get_or_create("cli:direct")
+    session.metadata[SESSION_MODEL_PRESET_METADATA_KEY] = "fast"
+    status = await cmd_model(_ctx(loop, "/model"))
+
+    assert "Could not switch model preset" in switched.content
+    assert "No API key configured for provider 'openai'." in switched.content
+    assert "Current selection error" in status.content
+    assert "No API key configured for provider 'openai'." in status.content
+
+
+@pytest.mark.asyncio
 async def test_model_command_does_not_depend_on_my_allow_set(tmp_path) -> None:
     loop = _make_loop(tmp_path)
     assert loop.tools_config.my.allow_set is False
 
     await cmd_model(_ctx(loop, "/model fast", args="fast"))
 
-    assert loop.model_preset == "fast"
+    assert _saved_model_preset(loop) == "fast"
 
 
 @pytest.mark.asyncio
@@ -142,11 +195,45 @@ async def test_model_command_registered_as_exact_and_prefix(tmp_path) -> None:
     assert out.metadata == {"render_as": "text"}
     assert out.content == "\n".join([
         "Switched model preset to `fast`.",
+        "- Scope: current session",
         "- Model: `openai/gpt-4.1`",
         "- Context window: 32768",
         "- Max output tokens: 4096",
     ])
-    assert loop.model_preset == "fast"
+    assert _saved_model_preset(loop) == "fast"
+
+
+@pytest.mark.asyncio
+async def test_model_command_does_not_change_another_session(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+
+    await cmd_model(_ctx(loop, "/model fast", args="fast"))
+    other = InboundMessage(channel="cli", sender_id="user", chat_id="other", content="/model")
+    out = await cmd_model(
+        CommandContext(msg=other, session=None, key=other.session_key, raw="/model", loop=loop)
+    )
+
+    assert "Current preset: `default`" in out.content
+    assert _saved_model_preset(loop) == "fast"
+
+
+@pytest.mark.asyncio
+async def test_model_command_reports_and_recovers_removed_session_preset(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+    session = loop.sessions.get_or_create("cli:direct")
+    session.metadata[SESSION_MODEL_PRESET_METADATA_KEY] = "removed"
+    loop.sessions.save(session)
+
+    status = await loop.process_direct("/model", session_key="cli:direct")
+    switched = await loop.process_direct("/model default", session_key="cli:direct")
+
+    assert status is not None
+    assert "model_preset 'removed' not found" in status.content
+    assert "Available presets: `default`, `fast`" in status.content
+    assert "Switch with `/model <preset>`" in status.content
+    assert switched is not None
+    assert "Switched model preset to `default`." in switched.content
+    assert _saved_model_preset(loop) == "default"
 
 
 def test_model_command_in_help_and_palette() -> None:
@@ -171,34 +258,27 @@ async def test_goal_command_shows_usage_without_args(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_goal_command_rejects_mid_turn_without_session(tmp_path) -> None:
+@pytest.mark.parametrize("with_session", [False, True])
+async def test_goal_command_preserves_task_and_visible_command(tmp_path, with_session) -> None:
     loop = _make_loop(tmp_path)
-    out = await cmd_goal(_ctx(loop, "/goal do work", args="do work"))
-    assert out is not None
-    assert out.channel == "cli"
-    assert out.chat_id == "direct"
-    assert out.metadata == {"render_as": "text"}
-    assert out.content == (
-        "A task is already running for this chat. "
-        "Use `/stop` first, then send `/goal <long-running task description>` again."
-    )
-
-
-@pytest.mark.asyncio
-async def test_goal_command_marks_turn_and_preserves_explicit_request(tmp_path) -> None:
-    loop = _make_loop(tmp_path)
-    ctx = _ctx_session(loop, "/goal audit the repo", args="audit the repo")
+    task = "检查 /tmp/project\n保留现有文件。"
+    command = f"/goal {task}"
+    ctx = _ctx_session(loop, command, args=task)
+    if not with_session:
+        ctx.session = None
     out = await cmd_goal(ctx)
-    assert out is None
-    assert ctx.msg.content == "/goal audit the repo"
-    assert ctx.msg.metadata.get("original_command") == "/goal"
-    assert ctx.msg.metadata.get("original_content") == "/goal audit the repo"
-    assert ctx.msg.metadata.get("goal_requested") is True
-    assert isinstance(ctx.msg.metadata.get("goal_started_at"), int | float)
-    assert len(ctx.turn_scopes) == 1
-    with ctx.turn_scopes[0]:
-        assert goal_mutation_allowed() is True
+    assert isinstance(out, InboundMessage)
+    assert ctx.msg.content == command
+    assert out.content == task
+    assert out.metadata["original_content"] == command
+    assert out.metadata["goal_requested"] is True
+    assert out.metadata[HIDDEN_HISTORY_META] == {"kind": "goal_request"}
     assert goal_mutation_allowed() is False
+    session = loop.sessions.get_or_create(ctx.key)
+    assert [(row["role"], row["content"]) for row in session.messages] == [
+        ("user", command),
+    ]
+
 
 
 @pytest.mark.asyncio
@@ -208,12 +288,11 @@ async def test_goal_command_registered_on_router(tmp_path) -> None:
     loop = _make_loop(tmp_path)
     ctx = _ctx_session(loop, "/goal ship it", args="ship it")
     out = await router.dispatch(ctx)
-    assert out is None
-    assert "ship it" in ctx.msg.content
-    assert len(ctx.turn_scopes) == 1
-    with ctx.turn_scopes[0]:
-        assert goal_mutation_allowed() is True
+    assert isinstance(out, InboundMessage)
+    assert out.content == "ship it"
+    assert out.metadata["goal_requested"] is True
     assert goal_mutation_allowed() is False
+
 
 
 @pytest.mark.asyncio
@@ -236,7 +315,7 @@ async def test_goal_command_does_not_allow_internal_turn(tmp_path) -> None:
 
     out = await cmd_goal(ctx)
 
-    assert out is not None
+    assert isinstance(out, OutboundMessage)
     assert "only be started by a user" in out.content
     assert ctx.turn_scopes == []
 

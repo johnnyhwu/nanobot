@@ -1,8 +1,10 @@
 # nanobot Documentation
 
-Use these docs to get a working agent first, then open a task guide only when you need the next capability. Source-level design and extension details are kept in the contributor section.
+Use these docs to get a working agent first. After the first reply, describe your next goal to nanobot or choose a task guide to read yourself. Source-level design and extension details are kept in the contributor section.
 
 Repository docs follow the current source tree and can be newer than the latest package release. For published release docs, visit [nanobot.wiki](https://nanobot.wiki/docs/latest/getting-started/nanobot-overview).
+
+Use the graphical setup steps first when the WebUI exposes the setting. Expand **Manual configuration** for headless deployments or configuration managed as code. Settings without a graphical control keep their direct configuration instructions.
 
 ## Start Here
 
@@ -15,11 +17,17 @@ Repository docs follow the current source tree and can be newer than the latest 
 The recommended first-run path is:
 
 1. Install nanobot.
-2. Choose **Quick Start** in `nanobot onboard --wizard`.
-3. Run `nanobot gateway` and open `http://127.0.0.1:8765`.
+2. Let the installer open `nanobot webui` on a fresh local desktop.
+3. Configure a provider and model in **Settings → Models**.
 4. Send `Hello!` before configuring anything else.
 
-Most people do not need to edit JSON for the first run. The wizard handles the initial provider, model, and local WebUI settings. Current source versions also provide `nanobot webui` to start the gateway and open the browser in one step. After the WebUI opens, use **Settings** for models and built-in capabilities, **Settings → Channels** for chat apps, and **Apps** for CLI App or MCP integrations.
+Most people do not need to edit JSON for the first run. The WebUI handles the initial provider, model, and local browser settings. SSH, headless, existing-config, and older-release installs retain `nanobot onboard --wizard` as a terminal fallback. After the WebUI opens, use **Settings** for models and built-in capabilities, **Channels** for chat apps, and **Apps** for Agent Plugins, CLI Apps, and MCP integrations.
+
+## After the First Reply
+
+When the built-in `nanobot-document` skill is available and enabled, nanobot can consult the documentation bundled with your installation as you ask about features, configuration, or errors. Describe your current setup and one goal in the same chat; see [Continue with nanobot](./quick-start.md#continue-with-nanobot) for examples and explicit skill invocation. The skill links to the task and reference pages below as needed.
+
+For independent reading, choose a task guide below. Use the reference section when you need an exact field, default, command, or protocol detail.
 
 ## Add One Capability
 
@@ -32,6 +40,7 @@ Pick the row that matches what you want to accomplish next:
 | Choose a hosted, OAuth, company, or local model | [Provider Cookbook](./provider-cookbook.md) |
 | Add model fallbacks | [Configure Model Fallback](./guides/configure-model-fallback.md) |
 | Enable web search | [Configure Web Search](./guides/configure-web-search.md) |
+| Manage Agent Plugins, CLI Apps, or MCP integrations | [WebUI Apps](./webui.md#apps) |
 | Add an MCP tool server | [Configure MCP Tools](./guides/configure-mcp-tools.md) |
 | Generate images | [Image Generation](./image-generation.md) |
 | Schedule work or create a local trigger | [Automations](./automations.md) |
@@ -78,7 +87,7 @@ These pages explain implementation and extension points. You do not need them to
 |---|---|
 | Understand source ownership and runtime flow | [Architecture](./architecture.md) |
 | Set up a development environment | [Development](./development.md) and [CONTRIBUTING.md](../CONTRIBUTING.md) |
-| Add a channel package | [Channel Plugin Guide](./channel-plugin-guide.md) |
+| Add a channel package | [Channel Package Guide](./channel-package-guide.md) |
 | Build the WebUI source | [WebUI Development](../webui/README.md) |
 
 If a command or screen no longer matches these docs, please [open an issue](https://github.com/HKUDS/nanobot/issues) with your nanobot version, operating system, and the page that needs correction.

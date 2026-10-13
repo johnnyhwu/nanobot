@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from pydantic import BaseModel, Field
 
 from nanobot.cli import onboard as onboard_wizard
@@ -240,32 +241,20 @@ class TestGetFieldDisplayName:
         name = _get_field_display_name("user_name", field_info)
         assert name == "User Name"
 
-    def test_adds_url_suffix(self):
+    @pytest.mark.parametrize(
+        "field_name, suffix, prefix",
+        [
+            pytest.param("api_url", "Url", "Api", id="url_suffix"),
+            pytest.param("file_path", "Path", "File", id="path_suffix"),
+            pytest.param("user_id", "Id", "User", id="id_suffix"),
+            pytest.param("api_key", "Key", "Api", id="key_suffix"),
+            pytest.param("auth_token", "Token", "Auth", id="token_suffix"),
+        ],
+    )
+    def test_title_cases_field_name_parts(self, field_name, suffix, prefix):
         field_info = SimpleNamespace(description=None)
-        name = _get_field_display_name("api_url", field_info)
-        # Title case: "Api Url"
-        assert "Url" in name and "Api" in name
-
-    def test_adds_path_suffix(self):
-        field_info = SimpleNamespace(description=None)
-        name = _get_field_display_name("file_path", field_info)
-        assert "Path" in name and "File" in name
-
-    def test_adds_id_suffix(self):
-        field_info = SimpleNamespace(description=None)
-        name = _get_field_display_name("user_id", field_info)
-        # Title case: "User Id"
-        assert "Id" in name and "User" in name
-
-    def test_adds_key_suffix(self):
-        field_info = SimpleNamespace(description=None)
-        name = _get_field_display_name("api_key", field_info)
-        assert "Key" in name and "Api" in name
-
-    def test_adds_token_suffix(self):
-        field_info = SimpleNamespace(description=None)
-        name = _get_field_display_name("auth_token", field_info)
-        assert "Token" in name and "Auth" in name
+        name = _get_field_display_name(field_name, field_info)
+        assert suffix in name and prefix in name
 
     def test_adds_seconds_suffix(self):
         field_info = SimpleNamespace(description=None)
@@ -462,9 +451,16 @@ class TestConfigurePydanticModelDrafts:
             onboard_wizard, "_input_with_existing", lambda *_args, **_kwargs: text_value
         )
 
-    def test_back_commits_section_draft(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "exit_action",
+        [
+            pytest.param("back", id="back_commits_section_draft"),
+            pytest.param("done", id="completing_section_returns_updated_draft"),
+        ],
+    )
+    def test_leaving_section_commits_draft(self, monkeypatch, exit_action):
         model = _SimpleDraftModel()
-        self._patch_prompt_helpers(monkeypatch, ["first", "back"])
+        self._patch_prompt_helpers(monkeypatch, ["first", exit_action])
 
         result = _configure_pydantic_model(model, "Simple")
 
@@ -482,31 +478,16 @@ class TestConfigurePydanticModelDrafts:
         assert result is None
         assert model.api_key == ""
 
-    def test_completing_section_returns_updated_draft(self, monkeypatch):
-        model = _SimpleDraftModel()
-        self._patch_prompt_helpers(monkeypatch, ["first", "done"])
-
-        result = _configure_pydantic_model(model, "Simple")
-
-        assert result is not None
-        updated = cast(_SimpleDraftModel, result)
-        assert updated.api_key == "secret"
-        assert model.api_key == ""
-
-    def test_nested_section_back_commits_nested_edits(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "exit_action",
+        [
+            pytest.param("back", id="back_commits_nested_edits"),
+            pytest.param("done", id="done_commits_nested_edits"),
+        ],
+    )
+    def test_leaving_nested_section_commits_edits(self, monkeypatch, exit_action):
         model = _OuterDraftModel()
-        self._patch_prompt_helpers(monkeypatch, ["first", "first", "back", "done"])
-
-        result = _configure_pydantic_model(model, "Outer")
-
-        assert result is not None
-        updated = cast(_OuterDraftModel, result)
-        assert updated.nested.api_key == "secret"
-        assert model.nested.api_key == ""
-
-    def test_nested_section_done_commits_nested_edits(self, monkeypatch):
-        model = _OuterDraftModel()
-        self._patch_prompt_helpers(monkeypatch, ["first", "first", "done", "done"])
+        self._patch_prompt_helpers(monkeypatch, ["first", "first", exit_action, "done"])
 
         result = _configure_pydantic_model(model, "Outer")
 
@@ -869,8 +850,8 @@ class TestApiServerRegistration:
         assert config.api.api_key == "secret"
 
 
-class TestMainMenuUpdate:
-    """Tests for main menu including new Channel Common and API Server items."""
+class TestMainMenuInteraction:
+    """Main menu navigation, save actions, and terminal input behavior."""
 
     def test_choice_viewport_keeps_long_menus_within_terminal_height(self):
         """Long provider menus should render as a bounded scrolling slice."""
@@ -978,7 +959,14 @@ class TestMainMenuUpdate:
         expected_provider_names = set()
         seen_display_names: set[str] = set()
         for spec in PROVIDERS:
-            if spec.name == "custom" or spec.is_oauth or spec.is_transcription_only:
+            if (
+                spec.name == "custom"
+                or spec.is_transcription_only
+                or (
+                    spec.is_oauth
+                    and spec.name not in onboard_wizard._QUICK_START_OAUTH_PROVIDERS
+                )
+            ):
                 continue
             if spec.display_name in seen_display_names:
                 continue
@@ -988,8 +976,228 @@ class TestMainMenuUpdate:
 
         assert selected_provider_names == expected_provider_names
         assert "assemblyai" not in selected_provider_names
+        assert choices["OpenAI Codex"] == "openai_codex"
+        assert "github_copilot" not in selected_provider_names
         assert choices["OpenCode Zen"] == "opencode"
         assert choices[onboard_wizard._QUICK_START_CUSTOM_PROVIDER_CHOICE] == "custom"
+
+    def test_quick_start_openai_codex_uses_oauth_and_default_model(self, monkeypatch):
+        """Codex should authenticate without asking for an API key."""
+        config = Config()
+        oauth_calls: list[tuple[Config, str]] = []
+        model_prompts: list[tuple[str, str, str]] = []
+
+        monkeypatch.setattr(onboard_wizard, "_show_quick_start_progress", lambda *_args: None)
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_select_with_back",
+            lambda *args, **kwargs: "OpenAI Codex",
+        )
+
+        def fail_api_key_prompt(*_args, **_kwargs):
+            raise AssertionError("OpenAI Codex Quick Start should not ask for an API key")
+
+        def fake_model_input(prompt, current, provider, *, config):
+            model_prompts.append((prompt, current, provider))
+            return current
+
+        monkeypatch.setattr(onboard_wizard, "_input_text", fail_api_key_prompt)
+        monkeypatch.setattr(onboard_wizard, "_input_model_with_autocomplete", fake_model_input)
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_quick_start_oauth_login",
+            lambda selected_config, provider: oauth_calls.append(
+                (selected_config, provider)
+            )
+            or True,
+        )
+
+        assert onboard_wizard._configure_quick_start_provider(config) is True
+
+        assert oauth_calls == [(config, "openai_codex")]
+        assert model_prompts == [
+            ("Model ID", "openai-codex/gpt-5.6-sol", "openai_codex")
+        ]
+        assert config.providers.openai_codex.api_key is None
+        assert config.model_presets["primary"].provider == "openai_codex"
+        assert config.model_presets["primary"].model == "openai-codex/gpt-5.6-sol"
+
+    def test_quick_start_openai_codex_login_failure_does_not_create_preset(self, monkeypatch):
+        """A failed Codex login must not leave a ready-looking model preset."""
+        config = Config()
+
+        monkeypatch.setattr(onboard_wizard, "_show_quick_start_progress", lambda *_args: None)
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_select_with_back",
+            lambda *args, **kwargs: "OpenAI Codex",
+        )
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_input_model_with_autocomplete",
+            lambda *args, **kwargs: "openai-codex/gpt-5.6-sol",
+        )
+        monkeypatch.setattr(onboard_wizard, "_quick_start_oauth_login", lambda *args: False)
+
+        assert onboard_wizard._configure_quick_start_provider(config) is False
+        assert "primary" not in config.model_presets
+
+    def test_quick_start_openai_codex_login_reuses_existing_token(self, monkeypatch):
+        """Quick Start should not open a new login flow when Codex is already authenticated."""
+        import oauth_cli_kit
+
+        config = Config()
+        config.providers.openai.api_key = "${UNRELATED_MISSING_KEY}"
+        config.providers.openai_codex.proxy = "${CODEX_PROXY}"
+        token = SimpleNamespace(access="existing-token", account_id="account-123")
+        token_proxies: list[str | None] = []
+        login_calls: list[object] = []
+
+        monkeypatch.setenv("CODEX_PROXY", "http://127.0.0.1:8080")
+        monkeypatch.delenv("UNRELATED_MISSING_KEY", raising=False)
+        monkeypatch.setattr(
+            oauth_cli_kit,
+            "get_token",
+            lambda **kwargs: token_proxies.append(kwargs.get("proxy")) or token,
+        )
+        monkeypatch.setattr(
+            oauth_cli_kit,
+            "login_oauth_interactive",
+            lambda **kwargs: login_calls.append(kwargs),
+        )
+        monkeypatch.setattr(onboard_wizard.console, "print", lambda *args, **kwargs: None)
+
+        assert onboard_wizard._quick_start_oauth_login(config, "openai_codex") is True
+        assert token_proxies == ["http://127.0.0.1:8080"]
+        assert login_calls == []
+        assert config.providers.openai.api_key == "${UNRELATED_MISSING_KEY}"
+        assert config.providers.openai_codex.proxy == "${CODEX_PROXY}"
+
+    def test_quick_start_openai_codex_reports_incomplete_installation(self, monkeypatch):
+        import oauth_cli_kit
+
+        messages: list[str] = []
+        monkeypatch.delattr(oauth_cli_kit, "get_token")
+        monkeypatch.setattr(
+            onboard_wizard.console,
+            "print",
+            lambda message, *args, **kwargs: messages.append(str(message)),
+        )
+
+        assert onboard_wizard._quick_start_oauth_login(Config(), "openai_codex") is False
+        assert messages == [
+            "[red]This nanobot installation is missing the required oauth-cli-kit package. "
+            "Reinstall or upgrade nanobot-ai using the same installation method.[/red]"
+        ]
+
+    def test_quick_start_openai_codex_runs_interactive_login_for_bad_cached_token(
+        self, monkeypatch
+    ):
+        """A malformed cached token should fall back to the interactive OAuth flow."""
+        import oauth_cli_kit
+
+        config = Config()
+        config.providers.openai_codex.proxy = "http://127.0.0.1:8080"
+        prompts: list[str] = []
+        printed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        class FakePrompt:
+            def ask(self):
+                return "authorization-code"
+
+        def fake_login(**kwargs):
+            kwargs["print_fn"]("[bold]Open the browser[/bold]")
+            prompts.append(kwargs["prompt_fn"]("Paste the authorization code"))
+            assert kwargs["proxy"] == "http://127.0.0.1:8080"
+            return SimpleNamespace(
+                access="fresh-token",
+                account_id="[red]account-123[/red]",
+            )
+
+        monkeypatch.setattr(
+            oauth_cli_kit,
+            "get_token",
+            lambda **_kwargs: SimpleNamespace(account_id="missing-access"),
+        )
+        monkeypatch.setattr(oauth_cli_kit, "login_oauth_interactive", fake_login)
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_get_questionary",
+            lambda: SimpleNamespace(text=lambda *_args, **_kwargs: FakePrompt()),
+        )
+        monkeypatch.setattr(
+            onboard_wizard.console,
+            "print",
+            lambda *args, **kwargs: printed.append((args, kwargs)),
+        )
+
+        assert onboard_wizard._quick_start_oauth_login(config, "openai_codex") is True
+        assert prompts == ["authorization-code"]
+        assert any(
+            args == ("[bold]Open the browser[/bold]",) and kwargs == {"markup": False}
+            for args, kwargs in printed
+        )
+        assert any(r"\[red]account-123\[/red]" in str(args[0]) for args, _kwargs in printed)
+
+    def test_quick_start_codex_auth_check_ignores_unrelated_missing_env(self, monkeypatch):
+        """OAuth readiness should depend only on the Codex proxy and token."""
+        import oauth_cli_kit
+
+        config = Config()
+        config.providers.anthropic.api_key = "${UNRELATED_MISSING_KEY}"
+        monkeypatch.delenv("UNRELATED_MISSING_KEY", raising=False)
+        monkeypatch.setattr(
+            oauth_cli_kit,
+            "get_token",
+            lambda **kwargs: SimpleNamespace(access="existing-token"),
+        )
+
+        assert (
+            onboard_wizard._quick_start_oauth_is_authenticated(config, "openai_codex")
+            is True
+        )
+
+    def test_quick_start_codex_auth_check_rejects_malformed_token(self, monkeypatch):
+        """A malformed cached token should report not-ready instead of crashing."""
+        import oauth_cli_kit
+
+        monkeypatch.setattr(
+            oauth_cli_kit,
+            "get_token",
+            lambda **_kwargs: SimpleNamespace(account_id="missing-access"),
+        )
+
+        assert (
+            onboard_wizard._quick_start_oauth_is_authenticated(Config(), "openai_codex")
+            is False
+        )
+
+    def test_quick_start_summary_reports_missing_codex_oauth(self, monkeypatch):
+        """The review step should distinguish OAuth from an API-key setup."""
+        config = Config()
+        config.model_presets["primary"] = ModelPresetConfig(
+            model="openai-codex/gpt-5.6-sol",
+            provider="openai_codex",
+        )
+        captured: dict[str, list[tuple[str, str]]] = {}
+
+        monkeypatch.setattr(onboard_wizard, "_show_quick_start_progress", lambda *_args: None)
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_quick_start_oauth_is_authenticated",
+            lambda *args: False,
+        )
+        monkeypatch.setattr(
+            onboard_wizard,
+            "_print_summary_panel",
+            lambda rows, _title: captured.setdefault("rows", rows),
+        )
+
+        onboard_wizard._show_quick_start_summary(config)
+
+        rows = dict(captured["rows"])
+        assert rows["Status"] == "OpenAI Codex OAuth login missing"
+        assert rows["WebSocket channel"] == "enabled"
 
     def test_quick_start_provider_choice_skips_advanced_prompts(self, monkeypatch):
         """The beginner path should ask for provider credentials and model."""
@@ -1124,7 +1332,7 @@ class TestMainMenuUpdate:
         monkeypatch.setattr(onboard_wizard, "_select_with_back", lambda *a, **kw: "OpenRouter")
         monkeypatch.setattr(onboard_wizard, "_input_text", lambda *a, **kw: "sk-or-test")
 
-        def fake_model_input(prompt, current, provider):
+        def fake_model_input(prompt, current, provider, *, config):
             model_prompts.append((prompt, current, provider))
             return "openai/gpt-4o-mini"
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+
+import pytest
 
 from nanobot.providers.openai_compat_provider import (
     OpenAICompatProvider,
@@ -117,21 +118,39 @@ class TestBuildKwargsExtraBody:
             "chat_template_kwargs": {"enable_thinking": False},
         }
 
+    def test_extra_body_appends_tools_without_clobbering_functions(self) -> None:
+        function_tool = {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write a local file",
+                "parameters": {"type": "object"},
+            },
+        }
+        server_tool = {"type": "openrouter:web_search"}
+        provider = _make_provider({
+            "tools": [server_tool],
+            "custom_param": "value",
+        })
+
+        kwargs = provider._build_kwargs(
+            messages=_simple_messages(),
+            tools=[function_tool], model=None, max_tokens=100,
+            temperature=0.1, reasoning_effort=None, tool_choice=None,
+        )
+
+        assert kwargs["tools"] == [function_tool, server_tool]
+        assert kwargs["extra_body"] == {"custom_param": "value"}
+
     def test_extra_body_merges_with_thinking(self) -> None:
         """Config extra_body should merge with (and override) thinking params."""
         from nanobot.providers.registry import ProviderSpec
 
-        spec = MagicMock(spec=ProviderSpec)
-        spec.thinking_style = "deepseek"
-        spec.supports_prompt_caching = False
-        spec.strip_model_prefix = False
-        spec.model_overrides = []
-        spec.name = "custom"
-        spec.supports_max_completion_tokens = False
-        spec.env_key = None
-        spec.default_api_base = None
-        spec.is_local = True
-        spec.detect_by_base_keyword = None
+        spec = ProviderSpec(
+            name="custom", keywords=(), env_key="",
+            request_apis=("chat_completions", "responses"),
+            thinking_style="thinking_type", is_local=True,
+        )
 
         provider = OpenAICompatProvider(
             api_key="test",
@@ -147,6 +166,7 @@ class TestBuildKwargsExtraBody:
         body = kwargs.get("extra_body", {})
         # Config param should be present
         assert body.get("custom_param") == "value"
+        assert body["thinking"] == {"type": "enabled"}
 
     def test_nested_extra_body_does_not_clobber_siblings(self) -> None:
         """Nested dict merge should preserve sibling keys."""
@@ -237,9 +257,92 @@ class TestBuildResponsesBodyExtraBody:
                 "name": "read_file",
                 "description": "Read a file",
                 "parameters": {"type": "object"},
+                "strict": False,
             },
             {"type": "web_search"},
         ]
+
+    def test_responses_web_search_tool_owns_the_local_function(self) -> None:
+        provider = OpenAICompatProvider(
+            api_key="test-key",
+            default_model="gpt-4o",
+            spec=find_by_name("openai"),
+            extra_body={"tools": [{"type": "web_search"}]},
+        )
+
+        body = provider._build_responses_body(
+            messages=_simple_messages(),
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search with nanobot's configured backend",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "description": "Read a file",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ],
+            model=None,
+            max_tokens=100,
+            temperature=0.1,
+            reasoning_effort=None,
+            tool_choice=None,
+        )
+
+        assert body["tools"] == [
+            {
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object"},
+                "strict": False,
+            },
+            {"type": "web_search"},
+        ]
+        assert body["include"] == ["web_search_call.action.sources"]
+        assert provider._should_use_responses_api(None, None) is True
+
+    @pytest.mark.parametrize("extra_body", [None, {"tools": []}, {"tools": [{"type": "web_search"}]}])
+    def test_deepseek_preserves_the_local_search_function(self, extra_body) -> None:
+        provider = OpenAICompatProvider(
+            api_key="test-key",
+            default_model="deepseek-v4-flash",
+            spec=find_by_name("deepseek"),
+            extra_body=extra_body,
+        )
+
+        body = provider._build_responses_body(
+            messages=_simple_messages(),
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search with nanobot's configured backend",
+                    "parameters": {"type": "object"},
+                },
+            }],
+            model=None,
+            max_tokens=100,
+            temperature=0.1,
+            reasoning_effort=None,
+            tool_choice=None,
+        )
+
+        assert body["tools"] == [{
+            "type": "function",
+            "name": "web_search",
+            "description": "Search with nanobot's configured backend",
+            "parameters": {"type": "object"},
+            "strict": False,
+        }]
 
     def test_responses_extra_body_merges_include_without_duplicates(self) -> None:
         provider = OpenAICompatProvider(

@@ -60,7 +60,7 @@ class SampleTool(Tool):
 @tool_parameters(
     tool_parameters_schema(
         query=StringSchema(min_length=2),
-        count=IntegerSchema(2, minimum=1, maximum=10),
+        count=IntegerSchema(minimum=1, maximum=10),
         required=["query", "count"],
     )
 )
@@ -81,12 +81,12 @@ def test_schema_validate_value_matches_tool_validate_params() -> None:
     """ObjectSchema.validate_value 与 validate_json_schema_value、Tool.validate_params 一致。"""
     root = tool_parameters_schema(
         query=StringSchema(min_length=2),
-        count=IntegerSchema(2, minimum=1, maximum=10),
+        count=IntegerSchema(minimum=1, maximum=10),
         required=["query", "count"],
     )
     obj = ObjectSchema(
         query=StringSchema(min_length=2),
-        count=IntegerSchema(2, minimum=1, maximum=10),
+        count=IntegerSchema(minimum=1, maximum=10),
         required=["query", "count"],
     )
     params = {"query": "h", "count": 2}
@@ -110,14 +110,14 @@ def test_schema_validate_value_matches_tool_validate_params() -> None:
     expected = _Mini().validate_params(params)
     assert Schema.validate_json_schema_value(params, root, "") == expected
     assert obj.validate_value(params, "") == expected
-    assert IntegerSchema(0, minimum=1).validate_value(0, "n") == ["n must be >= 1"]
+    assert IntegerSchema(minimum=1).validate_value(0, "n") == ["n must be >= 1"]
 
 
 def test_schema_classes_equivalent_to_sample_tool_parameters() -> None:
     """Schema 类生成的 JSON Schema 应与手写 dict 一致，便于校验行为一致。"""
     built = tool_parameters_schema(
         query=StringSchema(min_length=2),
-        count=IntegerSchema(2, minimum=1, maximum=10),
+        count=IntegerSchema(minimum=1, maximum=10),
         mode=StringSchema("", enum=["fast", "full"]),
         meta=ObjectSchema(
             tag=StringSchema(""),
@@ -289,6 +289,43 @@ def test_exec_extract_absolute_paths_captures_home_paths() -> None:
     assert "~/out.txt" in paths
 
 
+def test_exec_extract_absolute_paths_captures_paths_after_equals() -> None:
+    cmd = "curl --output=/etc/passwd --config=~/.nanobot/config.json --user-home=~root"
+    paths = ExecTool._extract_absolute_paths(cmd)
+    assert "/etc/passwd" in paths
+    assert "~/.nanobot/config.json" in paths
+    assert "~root" in paths
+
+
+def test_exec_extract_absolute_paths_does_not_capture_query_tilde() -> None:
+    cmd = 'python query.py --query \'{job=~"app"}\''
+    paths = ExecTool._extract_absolute_paths(cmd)
+    assert not any(p.startswith("~") for p in paths)
+
+
+def test_exec_extract_absolute_paths_captures_bare_and_named_user_home_paths() -> None:
+    paths = ExecTool._extract_absolute_paths("cd ~ && cat ~root/.bashrc")
+    assert "~" in paths
+    assert "~root/.bashrc" in paths
+
+
+def test_exec_extract_absolute_paths_captures_tilde_after_shell_operators() -> None:
+    paths = ExecTool._extract_absolute_paths(
+        "cat <~root/.bashrc;~root/bin/tool|~daemon/bin/tool"
+    )
+    assert "~root/.bashrc" in paths
+    assert paths.count("~root/bin/tool") == 1
+    assert "~daemon/bin/tool" in paths
+
+
+def test_exec_extract_absolute_paths_captures_tilde_assignment_components() -> None:
+    paths = ExecTool._extract_absolute_paths(
+        "HOME=~ PATH=bin:~root/bin curl --config=~"
+    )
+    assert "~" in paths
+    assert "~root/bin" in paths
+
+
 def test_exec_extract_absolute_paths_captures_quoted_paths() -> None:
     cmd = 'cat "/tmp/data.txt" "~/.nanobot/config.json"'
     paths = ExecTool._extract_absolute_paths(cmd)
@@ -304,6 +341,48 @@ def test_exec_guard_blocks_home_path_outside_workspace(tmp_path) -> None:
         "Error: Command blocked by safety guard (path outside working dir)"
     )
     assert "hard policy boundary" in error
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("cd ~ && cat secret.txt", id="bare_tilde_cwd_escape"),
+        pytest.param("cat ~root/.bashrc", id="named_user_home_path"),
+        pytest.param("cat --config=~/.nanobot/config.json", id="equals_home_path_outside_workspace"),
+        pytest.param("cat --config=~root/.bashrc", id="equals_named_user_home_path"),
+    ],
+)
+def test_exec_guard_blocks_home_paths_outside_workspace(tmp_path, command) -> None:
+    tool = ExecTool(restrict_to_workspace=True)
+    error = tool._guard_command(command, str(tmp_path))
+    assert error is not None
+    assert error.startswith(
+        "Error: Command blocked by safety guard (path outside working dir)"
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <~root/.bashrc",
+        "cat ~-/.bashrc",
+        "cat ~+1/.bashrc",
+        "cat ~-1/.bashrc",
+    ],
+)
+def test_exec_guard_blocks_home_paths_with_special_shell_contexts(
+    tmp_path, command: str
+) -> None:
+    error = ExecTool(restrict_to_workspace=True)._guard_command(command, str(tmp_path))
+    assert error is not None
+    assert error.startswith(
+        "Error: Command blocked by safety guard (path outside working dir)"
+    )
+
+
+def test_exec_guard_allows_current_directory_tilde(tmp_path) -> None:
+    tool = ExecTool(restrict_to_workspace=True)
+    assert tool._guard_command("cat ~+/file.txt", str(tmp_path)) is None
 
 
 def test_exec_guard_blocks_quoted_home_path_outside_workspace(tmp_path) -> None:
@@ -494,6 +573,94 @@ def test_cast_params_nested_object() -> None:
     assert result["config"]["debug"] is True
 
 
+@pytest.mark.parametrize("types", [["array", "object"], ["object", "array"]])
+@pytest.mark.parametrize(
+    "value, expected", [(["2"], [2]), ({"count": "2"}, {"count": 2})],
+)
+def test_cast_type_union_recurses_into_matching_container(types, value, expected) -> None:
+    tool = CastTestTool({
+        "type": "object",
+        "properties": {"value": {
+            "type": types,
+            "properties": {"count": {"type": "integer", "minimum": 1}},
+            "items": {"type": "integer", "minimum": 1},
+        }},
+    })
+
+    result = tool.cast_params({"value": value})
+
+    assert result == {"value": expected}
+    assert tool.validate_params(result) == []
+    invalid = {"count": 0} if isinstance(value, dict) else [0]
+    assert "must be >= 1" in "; ".join(tool.validate_params({"value": invalid}))
+
+
+@pytest.mark.parametrize("types", [["integer", "string"], ["string", "integer"]])
+@pytest.mark.parametrize(
+    "value, error", [(0, "must be >= 1"), ("ab", "must be at least 3 chars")],
+)
+def test_type_union_enforces_matching_type_constraints(types, value, error) -> None:
+    tool = CastTestTool({
+        "type": "object",
+        "properties": {"value": {"type": types, "minimum": 1, "minLength": 3}},
+    })
+
+    result = tool.cast_params({"value": value})
+
+    assert result["value"] is value
+    assert error in "; ".join(tool.validate_params(result))
+
+
+@pytest.mark.parametrize("types", [["integer", "string"], ["string", "integer"]])
+@pytest.mark.parametrize("value", [True, 1.5, None])
+def test_type_union_rejects_undeclared_types_without_coercion(types, value) -> None:
+    tool = CastTestTool({
+        "type": "object",
+        "properties": {"value": {"type": types}},
+    })
+
+    result = tool.cast_params({"value": value})
+
+    assert result["value"] is value
+    assert tool.validate_params(result)
+
+
+@pytest.mark.parametrize(
+    "types, value, error",
+    [
+        (["number", "boolean", "null"], True, None),
+        (["number", "boolean", "null"], 1.5, None),
+        (["number", "boolean", "null"], None, None),
+        (["string", "number"], float("inf"), "value must be finite"),
+        (["string", "number"], float("nan"), "value must be finite"),
+    ],
+)
+def test_type_union_preserves_numeric_boolean_and_null_values(types, value, error) -> None:
+    for order in (types, types[::-1]):
+        tool = CastTestTool({
+            "type": "object",
+            "properties": {"value": {"type": order}},
+        })
+
+        result = tool.cast_params({"value": value})
+
+        assert result["value"] is value
+        assert tool.validate_params(result) == ([error] if error else [])
+
+
+@pytest.mark.parametrize("value, expected", [("42", 42), (None, None)])
+def test_nullable_integer_retains_safe_casts(value, expected) -> None:
+    tool = CastTestTool({
+        "type": "object",
+        "properties": {"value": {"type": ["integer", "null"]}},
+    })
+
+    result = tool.cast_params({"value": value})
+
+    assert result == {"value": expected}
+    assert tool.validate_params(result) == []
+
+
 def test_cast_params_bool_not_cast_to_int() -> None:
     """Booleans should not be silently cast to integers."""
     tool = CastTestTool(
@@ -574,6 +741,24 @@ def test_cast_params_invalid_string_to_number() -> None:
     )
     result = tool.cast_params({"rate": "not_a_number"})
     assert result["rate"] == "not_a_number"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf"), "NaN", "Infinity", "-Infinity"],
+)
+def test_cast_params_rejects_non_finite_numbers(value: float | str) -> None:
+    """JSON number parameters must remain finite after schema-driven casting."""
+    tool = CastTestTool(
+        {
+            "type": "object",
+            "properties": {"rate": {"type": "number"}},
+        }
+    )
+
+    result = tool.cast_params({"rate": value})
+
+    assert tool.validate_params(result) == ["rate must be finite"]
 
 
 def test_validate_params_bool_not_accepted_as_number() -> None:
@@ -692,6 +877,22 @@ def test_exec_config_timeout_uncapped_and_zero() -> None:
         ExecToolConfig(timeout=-1)
 
 
+def test_exec_config_accepts_bwrap_bind_aliases() -> None:
+    cfg = ExecToolConfig.model_validate(
+        {
+            "sandboxRoBinds": ["/home/user/.local/bin"],
+            "sandboxRwBinds": ["/home/user/.cache/uv"],
+        }
+    )
+
+    dumped = cfg.model_dump(by_alias=True)
+
+    assert cfg.sandbox_ro_binds == ["/home/user/.local/bin"]
+    assert cfg.sandbox_rw_binds == ["/home/user/.cache/uv"]
+    assert dumped["sandboxRoBinds"] == ["/home/user/.local/bin"]
+    assert dumped["sandboxRwBinds"] == ["/home/user/.cache/uv"]
+
+
 def test_resolve_timeout_config_uncapped_and_unlimited() -> None:
     """Config timeout drives the hard timeout uncapped; 0 means no limit (#3595)."""
     assert ExecTool(timeout=3600)._resolve_timeout(None) == 3600
@@ -715,6 +916,39 @@ def test_resolve_type_simple_string() -> None:
 def test_resolve_type_union_with_null() -> None:
     """Union type ['string', 'null'] resolves to 'string'."""
     assert Tool._resolve_type(["string", "null"]) == "string"
+
+
+@pytest.mark.parametrize("raw_type", ["null", ["null"]])
+@pytest.mark.parametrize("value", ["", 0, False, [], {}])
+def test_null_only_schema_rejects_non_null_values(raw_type, value) -> None:
+    schema = {"type": raw_type}
+    assert Schema.validate_json_schema_value(value, schema, "value") == [
+        "value should be null"
+    ]
+    assert Schema.validate_json_schema_value(None, schema) == []
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": ["string", "null"], "enum": ["fast"]},
+        {"type": "string", "nullable": True, "enum": ["fast"]},
+        {"type": ["integer", "null"], "enum": [1]},
+        {"type": ["string", "integer", "null"], "enum": ["fast", 1]},
+    ],
+)
+def test_nullable_schema_still_enforces_enum(schema) -> None:
+    assert Schema.validate_json_schema_value(None, schema, "mode") == [
+        f"mode must be one of {schema['enum']}"
+    ]
+    assert Schema.validate_json_schema_value(None, {**schema, "enum": [None]}) == []
+    for value in schema["enum"]:
+        assert Schema.validate_json_schema_value(value, schema) == []
+
+
+def test_nullable_string_schema_enforces_enum() -> None:
+    assert StringSchema(nullable=True, enum=["fast"]).validate_value(None)
+    assert StringSchema(nullable=True, enum=["fast", None]).validate_value(None) == []
 
 
 def test_resolve_type_only_null() -> None:

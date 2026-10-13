@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import Field
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.image_generation_config import ImageGenerationToolConfig
+from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.schema import (
     ArraySchema,
     IntegerSchema,
@@ -15,11 +18,11 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.config.paths import get_media_dir
-from nanobot.config_base import Base
 from nanobot.providers.image_generation import (
     ImageGenerationError,
     ImageGenerationProvider,
     get_image_gen_provider,
+    image_gen_provider_configs,
 )
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.security.workspace_policy import WorkspaceBoundaryError, resolve_allowed_path
@@ -31,18 +34,8 @@ from nanobot.utils.artifacts import (
 from nanobot.utils.helpers import detect_image_mime
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ProviderConfig
-
-
-class ImageGenerationToolConfig(Base):
-    """Image generation tool configuration."""
-    enabled: bool = False
-    provider: str = "openrouter"
-    model: str = "openai/gpt-5.4-image-2"
-    default_aspect_ratio: str = "1:1"
-    default_image_size: str = "1K"
-    max_images_per_turn: int = Field(default=4, ge=1, le=8)
-    save_dir: str = "generated"
+    from nanobot.agent.tools.context import ToolContext
+    from nanobot.config.schema import Config, ProviderConfig
 
 
 @tool_parameters(
@@ -79,15 +72,15 @@ class ImageGenerationTool(Tool):
         return ImageGenerationToolConfig
 
     @classmethod
-    def enabled(cls, ctx: Any) -> bool:
-        return ctx.config.image_generation.enabled
+    def enabled(cls, ctx: ToolContext) -> bool:
+        return ctx.providers_config is not None and ctx.config.image_generation.enabled
 
     @classmethod
-    def create(cls, ctx: Any) -> Tool:
+    def create(cls, ctx: ToolContext) -> Tool:
         return cls(
             workspace=ctx.workspace,
             config=ctx.config.image_generation,
-            provider_configs=ctx.image_generation_provider_configs,
+            provider_configs=image_gen_provider_configs(ctx.providers_config),
         )
 
     def __init__(
@@ -121,15 +114,21 @@ class ImageGenerationTool(Tool):
 
     def _provider_client(self) -> ImageGenerationProvider | None:
         provider = self._provider_config()
-        cls = get_image_gen_provider(self.config.provider)
+        cls = get_image_gen_provider(self.config.provider, provider)
         if cls is None:
             return None
-        kwargs = {
-            "api_key": provider.api_key if provider else None,
-            "api_base": provider.api_base if provider else None,
-            "extra_headers": provider.extra_headers if provider else None,
-            "extra_body": provider.extra_body if provider else None,
-            "proxy": provider.proxy if provider else None,
+        headers = dict(provider.extra_headers or {}) if provider else {}
+        overridden = {key.lower() for key in (self.config.extra_headers or {})}
+        headers = {key: value for key, value in headers.items() if key.lower() not in overridden}
+        headers.update(self.config.extra_headers or {})
+        body = deepcopy(provider.extra_body or {}) if provider else {}
+        body.update(deepcopy(self.config.extra_body or {}))
+        kwargs: dict[str, Any] = {
+            "api_key": provider.api_key if provider and isinstance(provider.api_key, str) else None,
+            "api_base": provider.api_base if provider and isinstance(provider.api_base, str) else None,
+            "extra_headers": headers or None,
+            "extra_body": body or None,
+            "proxy": provider.proxy if provider and isinstance(provider.proxy, str) else None,
         }
         return cls(**kwargs)
 
@@ -162,7 +161,7 @@ class ImageGenerationTool(Tool):
             return []
         return [self._resolve_reference_image(value) for value in values if value]
 
-    async def execute(
+    async def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         prompt: str,
         reference_images: list[str] | None = None,
@@ -208,3 +207,61 @@ class ImageGenerationTool(Tool):
             return generated_image_tool_result(artifacts)
         except (ArtifactError, ImageGenerationError, OSError) as exc:
             return ToolResult.error(f"Error: {exc}")
+
+
+def register_image_generation_tool(
+    config: Config,
+    registry: ToolRegistry,
+    *,
+    workspace: Path,
+) -> None:
+    """Assemble the configured tool in the application's shared registry."""
+    from nanobot.agent.tools.context import ToolContext
+
+    ctx = ToolContext(
+        config=config.tools,
+        workspace=str(workspace),
+        providers_config=config.providers,
+    )
+    if ImageGenerationTool.enabled(ctx):
+        registry.register(ImageGenerationTool.create(ctx))
+    else:
+        registry.unregister("generate_image")
+
+
+async def reload_image_generation_tool(
+    *,
+    config_path: Path,
+    workspace: Path,
+    registry: ToolRegistry,
+) -> dict[str, Any]:
+    """Refresh the application's image tool from its persisted config."""
+    try:
+        from nanobot.config.loader import load_config, resolve_config_env_vars
+
+        config = resolve_config_env_vars(load_config(config_path), config_path=config_path)
+        register_image_generation_tool(config, registry, workspace=workspace)
+    except Exception as exc:
+        logger.warning("Image generation hot reload could not read config: {}", exc)
+        return {
+            "ok": False,
+            "message": "Could not reload image generation config.",
+            "requires_restart": True,
+            "error": str(exc),
+        }
+
+    tool_config = config.tools.image_generation
+    logger.info(
+        "Image generation config reloaded: enabled={} provider={} model={}",
+        tool_config.enabled,
+        tool_config.provider,
+        tool_config.model,
+    )
+    return {
+        "ok": True,
+        "message": "Image generation settings applied without restarting nanobot.",
+        "enabled": tool_config.enabled,
+        "provider": tool_config.provider,
+        "model": tool_config.model,
+        "requires_restart": False,
+    }
