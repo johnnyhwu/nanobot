@@ -262,7 +262,7 @@ def test_weixin_package_manifest_owns_runtime_and_webui_metadata() -> None:
 
     assert plugin is not None
     assert plugin.runtime == "nanobot.channels.weixin.runtime:WeixinChannel"
-    assert plugin.dependencies == ("qrcode[pil]>=8.0", "pycryptodome>=3.20.0")
+    assert plugin.dependencies == ("qrcode[pil]>=8.0",)
     assert plugin.connector == "nanobot.channels.weixin.connect:WeixinConnectStore"
     assert plugin.webui == "webui/index.tsx"
 

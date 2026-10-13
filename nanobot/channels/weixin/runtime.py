@@ -27,6 +27,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from loguru import logger
 from pydantic import Field, model_validator
 
@@ -2522,25 +2523,8 @@ def _encrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
     pad_len = 16 - len(data) % 16
     padded = data + bytes([pad_len] * pad_len)
 
-    with suppress(ImportError):
-        from Crypto.Cipher import AES
-
-        aes_module = cast(Any, AES)
-        cipher = aes_module.new(key, aes_module.MODE_ECB)
-        return cipher.encrypt(padded)
-
-    try:
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-        cipher_obj = Cipher(algorithms.AES(key), modes.ECB())
-        encryptor = cipher_obj.encryptor()
-        return encryptor.update(padded) + encryptor.finalize()
-    except ImportError:
-        logger.warning(
-            "Cannot encrypt media. Run `nanobot plugins enable weixin` "
-            "to install WeChat support."
-        )
-        return data
+    encryptor = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+    return encryptor.update(padded) + encryptor.finalize()
 
 
 def _decrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
@@ -2554,30 +2538,8 @@ def _decrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
         logger.warning("Failed to parse AES key, returning raw data: {}", e)
         return data
 
-    decrypted: bytes | None = None
-
-    with suppress(ImportError):
-        from Crypto.Cipher import AES
-
-        aes_module = cast(Any, AES)
-        cipher = aes_module.new(key, aes_module.MODE_ECB)
-        decrypted = cipher.decrypt(data)
-
-    if decrypted is None:
-        try:
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-            cipher_obj = Cipher(algorithms.AES(key), modes.ECB())
-            decryptor = cipher_obj.decryptor()
-            decrypted = decryptor.update(data) + decryptor.finalize()
-        except ImportError:
-            logger.warning(
-                "Cannot decrypt media. Run `nanobot plugins enable weixin` "
-                "to install WeChat support."
-            )
-            return data
-
-    return _pkcs7_unpad_safe(decrypted)
+    decryptor = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+    return _pkcs7_unpad_safe(decryptor.update(data) + decryptor.finalize())
 
 
 def _pkcs7_unpad_safe(data: bytes, block_size: int = 16) -> bytes:

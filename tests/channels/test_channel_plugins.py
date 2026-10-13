@@ -1380,7 +1380,7 @@ def test_plugins_enable_channel_installs_extra_and_writes_config(monkeypatch, tm
     runner = CliRunner()
     _stub_optional_feature_cli(
         monkeypatch,
-        extras={"weixin": ["qrcode[pil]>=8.0", "pycryptodome>=3.20.0"]},
+        extras={"weixin": ["qrcode[pil]>=8.0"]},
         installed=False,
         commands=commands,
         channels=["weixin"],
@@ -1391,7 +1391,7 @@ def test_plugins_enable_channel_installs_extra_and_writes_config(monkeypatch, tm
 
     assert result.exit_code == 0
     assert commands == [
-        [sys.executable, "-m", "pip", "install", "qrcode[pil]>=8.0", "pycryptodome>=3.20.0"]
+        [sys.executable, "-m", "pip", "install", "qrcode[pil]>=8.0"]
     ]
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert data["channels"]["weixin"]["enabled"] is True
@@ -2726,7 +2726,7 @@ def test_optional_dependency_metadata_for_enable():
             "python-socks[asyncio]>=2.8.0,<3.0.0; sys_platform != 'win32'",
         ),
         "wecom": ("wecom-aibot-sdk-python>=0.1.7,<0.2.0",),
-        "weixin": ("qrcode[pil]>=8.0", "pycryptodome>=3.20.0"),
+        "weixin": ("qrcode[pil]>=8.0",),
         "whatsapp": (
             "neonize>=0.4.3.post0,<0.5.0",
             "python-magic>=0.4.27; sys_platform != 'win32'",

@@ -38,9 +38,6 @@ PLUGIN = ChannelPlugin(
     connector=f"{__package__}.connect:WeixinConnectStore",
     setup=SETUP_SPEC,
     management=ChannelManagementSpec(local_state_present=local_state_present),
-    dependencies=(
-        "qrcode[pil]>=8.0",
-        "pycryptodome>=3.20.0",
-    ),
+    dependencies=("qrcode[pil]>=8.0",),
     webui="webui/index.tsx",
 )
