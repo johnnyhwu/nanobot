@@ -30,7 +30,7 @@ from nanobot.agent.tools.exec_session import (
     clamp_session_int,
     format_session_poll,
 )
-from nanobot.agent.tools.sandbox import wrap_command
+from nanobot.agent.tools.sandbox import SANDBOX_BACKENDS, wrap_command
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -171,6 +171,7 @@ class ExecTool(Tool):
             path_append=cfg.path_append,
             sandbox_ro_binds=cfg.sandbox_ro_binds,
             sandbox_rw_binds=cfg.sandbox_rw_binds,
+            sandbox_allow_network=cfg.sandbox_allow_network,
             allowed_env_keys=cfg.allowed_env_keys,
             allow_patterns=cfg.allow_patterns,
             deny_patterns=cfg.deny_patterns,
@@ -191,6 +192,7 @@ class ExecTool(Tool):
         path_append: str = "",
         sandbox_ro_binds: list[str] | None = None,
         sandbox_rw_binds: list[str] | None = None,
+        sandbox_allow_network: bool = True,
         allowed_env_keys: list[str] | None = None,
         session_manager: ExecSessionManager | None = None,
     ):
@@ -225,6 +227,7 @@ class ExecTool(Tool):
         self.path_append = path_append
         self.sandbox_ro_binds = self._normalize_bind_roots(sandbox_ro_binds)
         self.sandbox_rw_binds = self._normalize_bind_roots(sandbox_rw_binds)
+        self.sandbox_allow_network = sandbox_allow_network
         self.allowed_env_keys = allowed_env_keys or []
         self._session_manager = session_manager or DEFAULT_EXEC_SESSION_MANAGER
 
@@ -438,6 +441,8 @@ class ExecTool(Tool):
             if guard_error:
                 return guard_error
 
+        env = self._build_env()
+
         if self.sandbox:
             if _IS_WINDOWS:
                 logger.warning(
@@ -453,12 +458,13 @@ class ExecTool(Tool):
                     cwd,
                     sandbox_ro_binds=[str(p) for p in self.sandbox_ro_binds],
                     sandbox_rw_binds=[str(p) for p in self.sandbox_rw_binds],
+                    allow_network=self.sandbox_allow_network,
+                    env_keys=env,
                 )
                 command = shlex.split(wrapped) if isinstance(command, list) else wrapped
                 cwd = str(Path(workspace).resolve())
 
         effective_timeout = self._resolve_timeout(timeout)
-        env = self._build_env()
 
         if isinstance(command, list):
             parent_path = os.environ.get("PATH", env.get("PATH", ""))
@@ -1174,7 +1180,7 @@ class ExecTool(Tool):
         self,
         workspace_root: Path | None = None,
     ) -> list[Path]:
-        if self.sandbox not in ("bwrap", "seatbelt") or _IS_WINDOWS:
+        if self.sandbox not in SANDBOX_BACKENDS or _IS_WINDOWS:
             return []
         roots = [*self.sandbox_ro_binds, *self.sandbox_rw_binds]
         if workspace_root is None:

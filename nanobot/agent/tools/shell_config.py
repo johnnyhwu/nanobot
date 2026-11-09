@@ -14,6 +14,7 @@ class ExecToolConfig(Base):
     sandbox: str = ""
     sandbox_ro_binds: list[str] = Field(default_factory=list)
     sandbox_rw_binds: list[str] = Field(default_factory=list)
+    sandbox_allow_network: bool = True
     allowed_env_keys: list[str] = Field(default_factory=list)
     allow_patterns: list[str] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)

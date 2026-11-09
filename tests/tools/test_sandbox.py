@@ -224,6 +224,13 @@ class TestBwrapBackend:
         assert (str(parent), str(parent)) not in bind_try_pairs
 
 
+    def test_network_namespace_only_when_network_is_denied(self, tmp_path):
+        ws = str(tmp_path / "project")
+        assert "--unshare-net" not in _parse(wrap_command("bwrap", "ls", ws, ws))
+        tokens = _parse(wrap_command("bwrap", "ls", ws, ws, allow_network=False))
+        assert "--unshare-net" in tokens[: tokens.index("--")]
+
+
 class TestSeatbeltBackend:
     """macOS Seatbelt policy generation.
 
@@ -336,9 +343,15 @@ class TestSeatbeltBackend:
         tokens = _parse(wrap_command("seatbelt", "mktemp", str(ws), str(ws)))
         assert tokens[3:6] == ["/usr/bin/env", f"HOME={ws}", f"TMPDIR={ws}"]
 
-    def test_network_matches_bwrap_policy(self, tmp_path):
+    def test_network_allowed_by_default(self, tmp_path):
         profile = self._profile(wrap_command("seatbelt", "ls", str(tmp_path), str(tmp_path)))
         assert "(allow network*)" in profile
+
+    def test_network_denied_when_disabled(self, tmp_path):
+        profile = self._profile(
+            wrap_command("seatbelt", "ls", str(tmp_path), str(tmp_path), allow_network=False)
+        )
+        assert "(allow network" not in profile
 
     def test_media_dir_read_only(self, tmp_path, monkeypatch):
         fake_media = (tmp_path / "media").resolve()
@@ -483,6 +496,86 @@ class TestSeatbeltBackend:
     def test_sbpl_quote_escapes_special_characters(self):
         """Backslashes and double quotes must be escaped with C-style escaping."""
         assert _sbpl_quote(r'path\with"quotes') == r'"path\\with\"quotes"'
+
+
+class TestLandrunBackend:
+    @pytest.fixture(autouse=True)
+    def landlock(self, monkeypatch, tmp_path):
+        media = tmp_path / "media"
+        monkeypatch.setattr("nanobot.agent.tools.sandbox.get_media_dir", lambda: media)
+        monkeypatch.setattr("nanobot.agent.tools.sandbox._landlock_abi", lambda: 7)
+
+    @staticmethod
+    def _grants(tokens: list[str], flag: str) -> set[str]:
+        options = tokens[: tokens.index("--")]
+        return {options[i + 1] for i, t in enumerate(options) if t == flag}
+
+    def test_grants_workspace_media_and_system_paths(self, tmp_path):
+        ws = tmp_path / "project"
+        tokens = _parse(wrap_command("landrun", "ls", str(ws), str(ws)))
+
+        assert tokens[0] == "landrun"
+        assert self._grants(tokens, "--rwx") == {str(ws)}
+        assert str(tmp_path / "media") in self._grants(tokens, "--ro")
+        assert "/usr" in self._grants(tokens, "--rox")
+        all_grants = set().union(
+            *(self._grants(tokens, f) for f in ("--ro", "--rox", "--rw", "--rwx"))
+        )
+        # The workspace parent holds config and must stay ungranted.
+        assert str(tmp_path) not in all_grants
+        assert "/tmp" not in all_grants
+
+    def test_custom_binds(self, tmp_path):
+        ws = tmp_path / "project"
+        tokens = _parse(wrap_command(
+            "landrun", "ls", str(ws), str(ws),
+            sandbox_ro_binds=[str(tmp_path / "bin"), str(tmp_path)],
+            sandbox_rw_binds=[str(tmp_path / "cache")],
+        ))
+        assert str(tmp_path / "bin") in self._grants(tokens, "--rox")
+        assert str(tmp_path) not in self._grants(tokens, "--rox")
+        assert str(tmp_path / "cache") in self._grants(tokens, "--rwx")
+
+    def test_comma_paths_are_rejected(self, tmp_path):
+        # landrun splits flag values on commas; "/a,b" would grant "/a".
+        ws = tmp_path / "project"
+        with pytest.raises(ValueError, match="','"):
+            wrap_command("landrun", "ls", str(ws), str(ws), sandbox_ro_binds=[f"{tmp_path},x"])
+
+    def test_environment_is_forwarded_explicitly(self, tmp_path):
+        ws = tmp_path / "project"
+        tokens = _parse(wrap_command(
+            "landrun", "env", str(ws), str(ws), env_keys=["HOME", "LANG", "GH_TOKEN"],
+        ))
+        env = self._grants(tokens, "--env")
+        assert {f"HOME={ws}", f"TMPDIR={ws}", "PATH", "LANG", "TERM", "GH_TOKEN"} == env
+
+    def test_command_runs_in_cwd_and_stops_if_cd_fails(self, tmp_path):
+        ws = tmp_path / "project"
+        sub = ws / "src"
+        tokens = _parse(wrap_command("landrun", "echo a; echo b", str(ws), str(sub)))
+        assert tokens[tokens.index("--") + 1:] == [
+            "sh", "-c", f"cd {shlex.quote(str(sub))} || exit\necho a; echo b",
+        ]
+
+    def test_network_flag_follows_allow_network(self, tmp_path):
+        ws = str(tmp_path / "project")
+        assert "--unrestricted-network" in _parse(wrap_command("landrun", "ls", ws, ws))
+        denied = _parse(wrap_command("landrun", "ls", ws, ws, allow_network=False))
+        assert "--unrestricted-network" not in denied
+
+    @pytest.mark.parametrize(
+        ("abi", "allow_network", "fails"),
+        [(0, True, True), (2, True, True), (3, True, False), (3, False, True), (4, False, False)],
+    )
+    def test_kernel_without_required_landlock_fails(self, tmp_path, monkeypatch, abi, allow_network, fails):
+        monkeypatch.setattr("nanobot.agent.tools.sandbox._landlock_abi", lambda: abi)
+        ws = str(tmp_path / "project")
+        if fails:
+            with pytest.raises(RuntimeError, match="Landlock ABI"):
+                wrap_command("landrun", "ls", ws, ws, allow_network=allow_network)
+        else:
+            assert wrap_command("landrun", "ls", ws, ws, allow_network=allow_network)
 
 
 class TestUnknownBackend:

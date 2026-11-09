@@ -1,12 +1,16 @@
 """Sandbox backends for shell command execution.
 
 To add a backend, match the callable signature of _bwrap and _seatbelt,
-including keyword-only sandbox_ro_binds and sandbox_rw_binds, and register
-it in _BACKENDS below.
+including keyword-only sandbox_ro_binds, sandbox_rw_binds, allow_network and
+env_keys, and register it in _BACKENDS below. env_keys names the variables the caller passes
+to the command; a backend that starts the command with a cleared environment
+must forward them.
 """
 
+import ctypes
 import os
 import shlex
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -52,13 +56,16 @@ def _bwrap(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    allow_network: bool = True,
+    env_keys: Iterable[str] | None = None,  # inherited by the wrapped command
 ) -> str:
     """Wrap command in a bubblewrap sandbox (requires bwrap in container).
 
     The workspace is bind-mounted read-write; its parent directory is hidden
     behind a fresh tmpfs. Media is mounted read-only for uploaded attachments.
     Explicit sandbox_ro_binds and sandbox_rw_binds add read-only and read-write
-    roots, respectively.
+    roots, respectively. Without allow_network the command gets a new network
+    namespace that only has loopback.
     """
     ws = Path(workspace).resolve()
     media = get_media_dir().resolve()
@@ -83,6 +90,8 @@ def _bwrap(
     ]
 
     args = ["bwrap", "--new-session", "--die-with-parent", "--setenv", "HOME", str(ws)]
+    if not allow_network:
+        args.append("--unshare-net")
     for p in required:
         args += ["--ro-bind", p, p]
     for p in optional:
@@ -189,6 +198,8 @@ def _seatbelt(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    allow_network: bool = True,
+    env_keys: Iterable[str] | None = None,  # inherited by the wrapped command
 ) -> str:
     """Wrap command in a macOS Seatbelt sandbox (requires sandbox-exec(1)).
 
@@ -203,8 +214,7 @@ def _seatbelt(
     stays denied.  Unlike ``bwrap``, a denied parent still appears in directory
     listings; only its contents are inaccessible.
 
-    Network access is left unrestricted, matching ``bwrap`` (which does not pass
-    ``--unshare-net``).
+    Network access is allowed unless allow_network is false.
     """
     ws = Path(workspace).resolve()
     media = get_media_dir().resolve()
@@ -227,7 +237,7 @@ def _seatbelt(
         "(allow sysctl-read)",
         "(allow mach*)",
         "(allow ipc*)",
-        "(allow network*)",
+        *(["(allow network*)"] if allow_network else []),
         # sh(1) reads the root directory while resolving a path, and
         # (subpath "/usr") does not cover "/" itself.  Without this rule the
         # shell aborts during startup.
@@ -307,7 +317,144 @@ def _seatbelt(
     return shlex.join(args)
 
 
-_BACKENDS = {"bwrap": _bwrap, "seatbelt": _seatbelt}
+# Landlock rights that read-only roots must withhold arrived in ABI 3
+# (truncate, Linux 6.2); earlier ABIs cannot keep media read-only.  TCP
+# restriction arrived in ABI 4 (Linux 6.7).
+_LANDLOCK_MIN_ABI = 3
+_LANDLOCK_MIN_ABI_NO_NETWORK = 4
+_SYS_LANDLOCK_CREATE_RULESET = 444  # same number on every Linux architecture
+_LANDLOCK_CREATE_RULESET_VERSION = 1
+
+_LANDRUN_SYSTEM_EXEC = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64")
+_LANDRUN_SYSTEM_READ = (
+    "/etc/alternatives",
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+    "/etc/crypto-policies",
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/localtime",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/proc",
+    "/dev/urandom",
+    "/dev/random",
+)
+_LANDRUN_SYSTEM_WRITE = ("/dev/null", "/dev/zero", "/dev/tty")
+_LANDRUN_FORWARDED_ENV = ("PATH", "LANG", "TERM")
+
+
+def _landlock_abi() -> int:
+    """Return the kernel's Landlock ABI version, or 0 when unavailable.
+
+    seccomp-filtered, disabled or missing Landlock all report 0.
+    """
+    if not sys.platform.startswith("linux"):
+        return 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    abi = libc.syscall(
+        _SYS_LANDLOCK_CREATE_RULESET,
+        None,
+        ctypes.c_size_t(0),
+        ctypes.c_uint32(_LANDLOCK_CREATE_RULESET_VERSION),
+    )
+    return max(abi, 0)
+
+
+def _landrun_path(path: str) -> str:
+    # landrun splits every list flag value on commas, so "/a,b" would grant "/a".
+    if "," in path:
+        raise ValueError(f"landrun sandbox cannot express a path containing ',': {path!r}")
+    return path
+
+
+def _landrun(
+    command: str,
+    workspace: str,
+    cwd: str,
+    *,
+    sandbox_ro_binds: Iterable[str] | None = None,
+    sandbox_rw_binds: Iterable[str] | None = None,
+    allow_network: bool = True,
+    env_keys: Iterable[str] | None = None,
+) -> str:
+    """Wrap command with landrun(1), a Landlock CLI that needs no privileges.
+
+    Landlock needs no namespaces or capabilities, so this backend works in
+    containers that cannot run bwrap (no CAP_SYS_ADMIN, default seccomp). The
+    process must run with no_new_privs, which landrun sets itself.
+
+    Access is an allow-list: system code is read/execute, the workspace is
+    read/write/execute, media is read-only, and explicit binds add roots.  The
+    workspace parent (the config directory in the default layout) is simply
+    not granted.  There is no mount namespace: nothing is hidden from
+    directory listings outside granted roots, and host /tmp is not shared;
+    HOME and TMPDIR use the workspace.  Landlock rules only add access, so a
+    read-only bind inside the workspace or a read-write bind stays writable.
+    Landlock also blocks ptrace and signals toward processes outside the
+    sandbox, such as the gateway itself.
+
+    Without allow_network, TCP bind and connect are denied (ABI 4+).  UDP is
+    denied only from ABI 10, and pathname UNIX sockets only from ABI 9, so
+    on older kernels DNS and other UDP traffic still work.  landrun clears
+    the environment, so only env_keys plus PATH, LANG and TERM are forwarded.
+
+    landrun is run with --best-effort because by default it requires the
+    newest Landlock ABI; the minimum ABI is enforced here so an older kernel
+    fails instead of running commands without the requested isolation.
+    """
+    required = _LANDLOCK_MIN_ABI if allow_network else _LANDLOCK_MIN_ABI_NO_NETWORK
+    abi = _landlock_abi()
+    if abi < required:
+        kernel = "6.2" if required == _LANDLOCK_MIN_ABI else "6.7"
+        raise RuntimeError(
+            f"landrun sandbox requires Landlock ABI {required}+ "
+            f"(Linux {kernel}+ with Landlock enabled); "
+            f"this kernel reports {abi or 'no Landlock support'}"
+        )
+
+    ws = Path(workspace).resolve()
+    media = get_media_dir().resolve()
+
+    try:
+        sandbox_cwd = str(ws / Path(cwd).resolve().relative_to(ws))
+    except ValueError:
+        sandbox_cwd = str(ws)
+
+    args = ["landrun", "--best-effort", "--ignore-missing"]
+    if allow_network:
+        args.append("--unrestricted-network")
+    for p in _LANDRUN_SYSTEM_EXEC:
+        args += ["--rox", p]
+    for p in _LANDRUN_SYSTEM_READ:
+        args += ["--ro", p]
+    for p in _LANDRUN_SYSTEM_WRITE:
+        args += ["--rw", p]
+    args += ["--rwx", _landrun_path(str(ws)), "--ro", _landrun_path(str(media))]
+    for p in _normalize_bind_paths(sandbox_ro_binds, workspace=ws):
+        args += ["--rox", _landrun_path(p)]
+    for p in _normalize_bind_paths(sandbox_rw_binds, workspace=ws):
+        args += ["--rwx", _landrun_path(p)]
+
+    args += ["--env", f"HOME={ws}", "--env", f"TMPDIR={ws}"]
+    forwarded = dict.fromkeys([*_LANDRUN_FORWARDED_ENV, *(env_keys or ())])
+    for key in forwarded:
+        if key not in ("HOME", "TMPDIR"):
+            args += ["--env", key]
+
+    # landrun has no --chdir.  Exit before evaluating any of the submitted
+    # shell list; `cd ... && a; b` would still execute b on failure.
+    args += ["--", "sh", "-c", f"cd {shlex.quote(sandbox_cwd)} || exit\n{command}"]
+    return shlex.join(args)
+
+
+_BACKENDS = {"bwrap": _bwrap, "seatbelt": _seatbelt, "landrun": _landrun}
+SANDBOX_BACKENDS = tuple(_BACKENDS)
 
 
 def wrap_command(
@@ -318,6 +465,8 @@ def wrap_command(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    allow_network: bool = True,
+    env_keys: Iterable[str] | None = None,
 ) -> str:
     """Wrap *command* using the named sandbox backend."""
     if backend := _BACKENDS.get(sandbox):
@@ -327,5 +476,7 @@ def wrap_command(
             cwd,
             sandbox_ro_binds=sandbox_ro_binds,
             sandbox_rw_binds=sandbox_rw_binds,
+            allow_network=allow_network,
+            env_keys=env_keys,
         )
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")

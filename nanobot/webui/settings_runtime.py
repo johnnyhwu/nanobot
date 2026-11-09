@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from nanobot.agent.tools.sandbox import SANDBOX_BACKENDS
 from nanobot.config.schema import Config
 from nanobot.security.network import is_loopback_host
 from nanobot.webui.settings_contracts import WebUISettingsError
@@ -141,8 +142,8 @@ def update_runtime_config(
     if "api.host" in values and not is_loopback_host(validated.api.host):
         if not validated.api.api_key.strip():
             raise WebUISettingsError("Set an API key in System before using a network bind address.")
-    if "tools.exec.sandbox" in values and validated.tools.exec.sandbox not in {"", "bwrap", "seatbelt"}:
-        raise WebUISettingsError("tools.exec.sandbox: choose no sandbox, bwrap, or seatbelt")
+    if "tools.exec.sandbox" in values and validated.tools.exec.sandbox not in {"", *SANDBOX_BACKENDS}:
+        raise WebUISettingsError("tools.exec.sandbox: choose no sandbox, bwrap, landrun, or seatbelt")
     if "tools.ssrf_whitelist" in values:
         for cidr in validated.tools.ssrf_whitelist:
             try:

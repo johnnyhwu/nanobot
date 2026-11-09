@@ -71,7 +71,7 @@ describe("Runtime configuration settings", () => {
     expect(screen.getByText("Update the gateway to edit these settings.")).toBeVisible();
   });
 
-  it.each(["bwrap", "seatbelt", ""])("saves the %s sandbox and reveals its path settings", async (backend) => {
+  it.each(["bwrap", "landrun", "seatbelt", ""])("saves the %s sandbox and reveals its path settings", async (backend) => {
     const payload = runtimeSettings();
     payload.runtime_config!["tools.exec.sandbox"] = backend ? "" : "seatbelt";
     requestMutationMock.mockResolvedValue({ ...payload, runtime_config: { ...payload.runtime_config, "tools.exec.sandbox": backend } });

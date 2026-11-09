@@ -302,6 +302,7 @@ def _snapshot_exec_config(config: ExecToolConfig) -> dict[str, object]:
         "sandbox": config.sandbox,
         "sandbox_ro_binds": list(config.sandbox_ro_binds),
         "sandbox_rw_binds": list(config.sandbox_rw_binds),
+        "sandbox_allow_network": config.sandbox_allow_network,
         "allowed_env_keys": list(config.allowed_env_keys),
         "allow_patterns": list(config.allow_patterns),
         "deny_patterns": list(config.deny_patterns),

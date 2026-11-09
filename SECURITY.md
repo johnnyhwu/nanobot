@@ -90,6 +90,7 @@ Set `"tools.exec.sandbox"` to wrap every shell command in an OS sandbox. Both ba
 | Backend | Value | Platform | Requires |
 |---------|-------|----------|----------|
 | [bubblewrap](https://github.com/containers/bubblewrap) | `"bwrap"` | Linux | `bwrap` (`apt install bubblewrap`). Pre-installed in the official Docker image. |
+| [landrun](https://github.com/Zouuup/landrun) (Landlock) | `"landrun"` | Linux 6.2+ | `landrun` on `PATH`. Needs no capabilities, namespaces or custom seccomp profile, so it works in containers that cannot run bwrap, such as Kubernetes pods without `SYS_ADMIN`. Not included in the official Docker image. |
 | Seatbelt | `"seatbelt"` | macOS | `sandbox-exec(1)`, shipped with macOS. |
 
 **Windows has no backend**: nanobot logs a warning and runs the command unsandboxed.
@@ -98,7 +99,9 @@ The backends protect the workspace's parent differently. `bwrap` masks it with a
 
 Seatbelt does **not** expose the host's shared `/tmp`, `/var/folders`, `/Library`, or `/etc` trees. It allows system code, device reads and selected system configuration/certificate paths. `HOME` and `TMPDIR` point to the workspace. Tools must use that scratch location; on macOS use an explicit template such as `mktemp "$TMPDIR/job.XXXXXX"`, since bare `mktemp` may prefer the host's system temp directory. Tools that require other installations or caches need narrow `sandboxRoBinds` / `sandboxRwBinds`. Read-only binds revoke workspace writes beneath them; explicit read-write binds take precedence, matching bwrap's operator-controlled policy. Seatbelt also prevents renaming or removing ancestor directories of media and read-only roots, so moving a writable parent cannot bypass a read-only rule; unrelated children of those ancestors remain writable where otherwise allowed. An explicit read-write bind covering an entire read-only root overrides that root's protection, but a writable descendant does not unlock its ancestors. This is filesystem containment, not a VM or separate user identity.
 
-Neither backend restricts network access.
+landrun applies a Landlock allow-list: system code is read/execute, the workspace is read/write/execute, media is read-only, and extra binds add roots. The workspace's parent is never granted, but, as with Seatbelt, nothing is hidden from directory listings. Host `/tmp` is not shared; `HOME` and `TMPDIR` point to the workspace. Landlock rules only add access, so a read-only bind inside the workspace or a read-write bind stays writable. Landlock also blocks access to the gateway process through `/proc` and signals. landrun starts commands with an empty environment; nanobot forwards `PATH`, `LANG`, `TERM` and `allowedEnvKeys`. nanobot checks the kernel's Landlock ABI before each command and refuses to run it when the kernel cannot enforce the requested policy.
+
+Backends allow network access by default. Set `tools.exec.sandboxAllowNetwork` to `false` to deny it: bwrap gives commands a network namespace with only loopback, Seatbelt drops its network rule, and landrun denies TCP bind and connect (Linux 6.7+). Landlock restricts UDP only from ABI 10 and pathname UNIX sockets only from ABI 9, so on older kernels DNS and other UDP traffic still work under landrun. Use host or cluster egress controls as well when network isolation matters.
 
 Enabling the sandbox also automatically activates `restrictToWorkspace` for file tools.
 
